@@ -262,6 +262,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
 
     total_wireless_users = 0
     total_eduroam_users = 0
+    total_uop_visitor_users = 0
+    total_uop_connect_users = 0
     ssid_counts: Dict[str, int] = {}
     band_counts: Dict[str, int] = {"2.4 GHz": 0, "5 GHz": 0, "6 GHz": 0, "Other": 0}
     proto_counts: Dict[str, int] = {}
@@ -280,6 +282,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         aps = site_aps.get(site_id, [])
 
         site_eduroam = 0
+        site_uop_visitor = 0
+        site_uop_connect = 0
         site_rssi: List[float] = []
 
         for c in clients:
@@ -288,9 +292,16 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             ssid_label = raw_ssid if raw_ssid else "(Unknown)"
             ssid_counts[ssid_label] = ssid_counts.get(ssid_label, 0) + 1
 
-            if raw_ssid.lower() == "eduroam":
+            ssid_norm = " ".join(raw_ssid.lower().replace("-", " ").replace("_", " ").split())
+            if ssid_norm == "eduroam":
                 total_eduroam_users += 1
                 site_eduroam += 1
+            elif ssid_norm in ("uop visitor", "uopvisitor"):
+                total_uop_visitor_users += 1
+                site_uop_visitor += 1
+            elif ssid_norm in ("uop connect", "uopconnect"):
+                total_uop_connect_users += 1
+                site_uop_connect += 1
 
             band = normalize_band(c.get("band"))
             band_counts[band] = band_counts.get(band, 0) + 1
@@ -354,13 +365,16 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             )
 
         site_total = len(clients)
+        site_other = max(0, site_total - site_eduroam - site_uop_visitor - site_uop_connect)
         sites_summary.append(
             {
                 "id": site_id,
                 "name": site_name,
                 "total_users": site_total,
                 "eduroam_users": site_eduroam,
-                "other_users": max(0, site_total - site_eduroam),
+                "uop_visitor_users": site_uop_visitor,
+                "uop_connect_users": site_uop_connect,
+                "other_users": site_other,
                 "aps_online": site_aps_on,
                 "aps_offline": site_aps_off,
                 "avg_rssi": round(sum(site_rssi) / len(site_rssi), 1) if site_rssi else None,
@@ -381,10 +395,12 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         key=lambda x: (-x["count"], x["name"]),
     )
 
-    eduroam_pct = (
-        round((total_eduroam_users / total_wireless_users) * 100, 1)
-        if total_wireless_users > 0
-        else 0.0
+    def pct(part: int) -> float:
+        return round((part / total_wireless_users) * 100, 1) if total_wireless_users > 0 else 0.0
+
+    other_wireless_users = max(
+        0,
+        total_wireless_users - total_eduroam_users - total_uop_visitor_users - total_uop_connect_users,
     )
 
     return {
@@ -396,8 +412,12 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         "summary": {
             "total_wireless_users": total_wireless_users,
             "eduroam_users": total_eduroam_users,
-            "eduroam_pct": eduroam_pct,
-            "other_wireless_users": max(0, total_wireless_users - total_eduroam_users),
+            "eduroam_pct": pct(total_eduroam_users),
+            "uop_visitor_users": total_uop_visitor_users,
+            "uop_visitor_pct": pct(total_uop_visitor_users),
+            "uop_connect_users": total_uop_connect_users,
+            "uop_connect_pct": pct(total_uop_connect_users),
+            "other_wireless_users": other_wireless_users,
             "total_sites": len(sites_summary),
             "active_sites": sum(1 for s in sites_summary if s["total_users"] > 0),
             "aps_online": aps_online,

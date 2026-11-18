@@ -95,6 +95,81 @@ def normalize_proto(raw: Any) -> str:
     return "Other"
 
 
+def extract_ap_uplink_info(ap: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return any active Ethernet ports on the AP negotiated below 1000 Mbps (1 Gbps)."""
+    port_stat = ap.get("port_stat")
+    if not isinstance(port_stat, dict) or not port_stat:
+        return []
+
+    lldp_top = ap.get("lldp_stat") if isinstance(ap.get("lldp_stat"), dict) else {}
+    lldp_map = ap.get("lldp_stats") if isinstance(ap.get("lldp_stats"), dict) else {}
+
+    degraded_ports: List[Dict[str, Any]] = []
+    # Check eth0 first, then any other ethernet ports in deterministic order
+    port_names = sorted(port_stat.keys(), key=lambda k: (0 if k == "eth0" else 1, k))
+
+    for port_name in port_names:
+        pstat = port_stat.get(port_name)
+        if not isinstance(pstat, dict):
+            continue
+
+        is_up = pstat.get("up")
+        raw_speed = pstat.get("speed")
+        speed = int(raw_speed) if isinstance(raw_speed, (int, float)) else 0
+
+        # Only evaluate ports that are up and report a negotiated link speed
+        if is_up is False or speed <= 0:
+            continue
+
+        full_duplex = pstat.get("full_duplex")
+        # Flag any port negotiated below 1000 Mbps (e.g. 10/100 Mbps) or half-duplex
+        if speed < 1000 or full_duplex is False:
+            port_lldp = lldp_map.get(port_name) if isinstance(lldp_map.get(port_name), dict) else {}
+            if not port_lldp and "system_name" in lldp_map:
+                port_lldp = lldp_map
+            lldp = {**lldp_top, **port_lldp}
+
+            switch_name = (
+                str(lldp.get("system_name") or "").strip()
+                or str(lldp.get("chassis_id") or "").strip()
+                or "Unknown Switch"
+            )
+            switch_port = (
+                str(lldp.get("port_id") or "").strip()
+                or str(lldp.get("port_desc") or "").strip()
+                or "Unknown Port"
+            )
+            switch_port_desc = str(lldp.get("port_desc") or "").strip()
+            mgmt_addrs = lldp.get("mgmt_addrs")
+            switch_ip = str(lldp.get("mgmt_addr") or "").strip()
+            if not switch_ip and isinstance(mgmt_addrs, list) and mgmt_addrs:
+                switch_ip = str(mgmt_addrs[0] or "").strip()
+
+            if full_duplex is True:
+                duplex_label = "Full"
+            elif full_duplex is False:
+                duplex_label = "Half"
+            else:
+                duplex_label = "Auto"
+
+            degraded_ports.append(
+                {
+                    "ap_port": port_name,
+                    "speed": speed,
+                    "speed_label": f"{speed} Mbps" if speed < 1000 else f"{speed // 1000} Gbps",
+                    "full_duplex": full_duplex,
+                    "duplex": duplex_label,
+                    "rx_errors": int(pstat.get("rx_errors") or 0),
+                    "switch_name": switch_name,
+                    "switch_port": switch_port,
+                    "switch_port_desc": switch_port_desc if switch_port_desc != switch_port else "",
+                    "switch_ip": switch_ip,
+                }
+            )
+
+    return degraded_ports
+
+
 def fetch_site_telemetry(
     session: requests.Session, site: Dict[str, Any]
 ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
@@ -196,6 +271,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
     aps_offline = 0
     all_aps_list: List[Dict[str, Any]] = []
     offline_aps: List[Dict[str, Any]] = []
+    slow_aps: List[Dict[str, Any]] = []
     sites_summary: List[Dict[str, Any]] = []
 
     for site_id, site in site_map.items():
@@ -232,29 +308,47 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         for ap in aps:
             status = str(ap.get("status") or "").lower()
             is_online = status == "connected"
+            ap_name = ap.get("name") or ap.get("mac", "Unnamed AP")
+            ap_model = ap.get("model", "")
+            ap_mac = ap.get("mac", "")
+            ap_ip = ap.get("ip", "")
+            ap_clients = int(ap.get("num_clients") or 0)
+
             if is_online:
                 aps_online += 1
                 site_aps_on += 1
+                for degraded in extract_ap_uplink_info(ap):
+                    slow_aps.append(
+                        {
+                            "name": ap_name,
+                            "site_name": site_name,
+                            "model": ap_model,
+                            "mac": ap_mac,
+                            "ip": ap_ip,
+                            "num_clients": ap_clients,
+                            **degraded,
+                        }
+                    )
             else:
                 aps_offline += 1
                 site_aps_off += 1
                 offline_aps.append(
                     {
-                        "name": ap.get("name") or ap.get("mac", "Unnamed AP"),
+                        "name": ap_name,
                         "site_name": site_name,
-                        "model": ap.get("model", ""),
-                        "mac": ap.get("mac", ""),
+                        "model": ap_model,
+                        "mac": ap_mac,
                         "status": status or "disconnected",
                     }
                 )
 
             all_aps_list.append(
                 {
-                    "name": ap.get("name") or ap.get("mac", "Unnamed AP"),
+                    "name": ap_name,
                     "site_name": site_name,
-                    "model": ap.get("model", ""),
-                    "ip": ap.get("ip", ""),
-                    "num_clients": int(ap.get("num_clients") or 0),
+                    "model": ap_model,
+                    "ip": ap_ip,
+                    "num_clients": ap_clients,
                     "status": "connected" if is_online else (status or "disconnected"),
                 }
             )
@@ -275,6 +369,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
 
     sites_summary.sort(key=lambda s: (-s["total_users"], s["name"].lower()))
     all_aps_list.sort(key=lambda a: (-a["num_clients"], a["name"].lower()))
+    slow_aps.sort(key=lambda a: (a["speed"], a["site_name"].lower(), a["name"].lower()))
 
     ssids_sorted = sorted(
         [{"name": k, "count": v} for k, v in ssid_counts.items()],
@@ -308,6 +403,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             "aps_online": aps_online,
             "aps_offline": aps_offline,
             "aps_total": aps_online + aps_offline,
+            "slow_aps_count": len(slow_aps),
             "avg_rssi": round(sum(rssi_values) / len(rssi_values), 1) if rssi_values else None,
         },
         "sites": sites_summary,
@@ -316,6 +412,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         "protocols": protos_sorted,
         "top_aps": all_aps_list[:10],
         "offline_aps": offline_aps,
+        "slow_aps": slow_aps,
         "alarms": alarms,
         "warnings": warnings,
         "fetched_at": datetime.now(timezone.utc).isoformat(),

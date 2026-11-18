@@ -64,6 +64,7 @@
     /* TV / Wallboard Mode */
     body.wallboard-mode .container { max-width: 100%; padding: 24px 36px; }
     body.wallboard-mode .two-col,
+    body.wallboard-mode .wallboard-hide,
     body.wallboard-mode #refreshBtn,
     body.wallboard-mode .badge { display: none !important; }
     body.wallboard-mode .title-block h1 { font-size: 2rem; }
@@ -75,6 +76,8 @@
     body.wallboard-mode .kpi-wireless .kpi-value { font-size: clamp(4rem, 7vw, 6.2rem); line-height: 1.05; }
     body.wallboard-mode .kpi-sub { font-size: 1.1rem; }
     body.wallboard-mode .chart-wrap { height: 320px; }
+    .sub-cell { display: block; font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
+    .section-single { margin-bottom: 22px; }
   </style>
 </head>
 <body>
@@ -148,6 +151,36 @@
         </div>
       </div>
     </section>
+    <section class="section-single wallboard-hide">
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-actions">
+            <h2 class="panel-title">APs Connected Below 1 Gbps (Speed / Duplex &amp; Switch Port)</h2>
+            <span id="slowApsBadge" class="pill ok">0 APs</span>
+          </div>
+          <div class="panel-actions">
+            <input id="slowApsFilter" class="search" type="search" placeholder="Filter AP, site, or switch..." oninput="renderSlowApsTable()" />
+            <button id="exportSlowApsBtn" class="btn-secondary" onclick="exportSlowApsCsv()">Export CSV</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>AP Name</th>
+                <th>Site</th>
+                <th>AP Port</th>
+                <th>Negotiated Speed &amp; Duplex</th>
+                <th>Switch Name (LLDP)</th>
+                <th>Switch Port (LLDP)</th>
+                <th class="num">Clients</th>
+              </tr>
+            </thead>
+            <tbody id="slowApsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
     <section class="two-col">
       <div class="panel"><div class="panel-header"><h2 class="panel-title">Recent Org Alarms (Last 24h)</h2></div><div id="alarmsList" class="alarm-list"></div></div>
       <div class="panel"><div class="panel-header"><h2 class="panel-title">Offline Access Points</h2></div><div id="offlineApsList" class="alarm-list"></div></div>
@@ -162,6 +195,17 @@
       const q = (document.getElementById("siteFilter")?.value || "").trim().toLowerCase();
       return (latestData.sites || []).filter(s => (s.name || "").toLowerCase().includes(q));
     }
+    function getFilteredSlowAps() {
+      if (!latestData) return [];
+      const q = (document.getElementById("slowApsFilter")?.value || "").trim().toLowerCase();
+      return (latestData.slow_aps || []).filter(ap =>
+        !q ||
+        (ap.name || "").toLowerCase().includes(q) ||
+        (ap.site_name || "").toLowerCase().includes(q) ||
+        (ap.switch_name || "").toLowerCase().includes(q) ||
+        (ap.switch_port || "").toLowerCase().includes(q)
+      );
+    }
     function toggleWallboardMode() {
       const active = document.body.classList.toggle("wallboard-mode");
       const btn = document.getElementById("wallboardBtn");
@@ -169,17 +213,33 @@
       btn.textContent = active ? "Exit Wallboard" : "TV / Wallboard Mode";
       if (latestData) setTimeout(() => renderCharts(latestData), 50);
     }
-    function exportSitesCsv() {
-      const rows = getFilteredSites();
-      if (!rows.length) return;
+    function downloadCsv(filename, headers, rows) {
       const csvEscape = val => {
         const s = String(val ?? "");
         return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
       };
-      const headers = ["Site", "eduroam Users", "Other Users", "Total Users", "APs Online", "APs Offline", "Avg RSSI (dBm)"];
       const lines = [
         headers.map(csvEscape).join(","),
-        ...rows.map(s => [
+        ...rows.map(r => r.map(csvEscape).join(","))
+      ];
+      const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+    function exportSitesCsv() {
+      const rows = getFilteredSites();
+      if (!rows.length) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(
+        `mist-sites-${dateStamp}.csv`,
+        ["Site", "eduroam Users", "Other Users", "Total Users", "APs Online", "APs Offline", "Avg RSSI (dBm)"],
+        rows.map(s => [
           s.name ?? "",
           s.eduroam_users ?? 0,
           s.other_users ?? 0,
@@ -187,18 +247,32 @@
           s.aps_online ?? 0,
           s.aps_offline ?? 0,
           s.avg_rssi !== null && s.avg_rssi !== undefined ? s.avg_rssi : ""
-        ].map(csvEscape).join(","))
-      ];
-      const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
+        ])
+      );
+    }
+    function exportSlowApsCsv() {
+      const rows = getFilteredSlowAps();
+      if (!rows.length) return;
       const dateStamp = new Date().toISOString().slice(0, 10);
-      a.href = url;
-      a.download = `mist-sites-${dateStamp}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      downloadCsv(
+        `mist-sub1g-aps-${dateStamp}.csv`,
+        ["AP Name", "AP MAC", "AP IP", "Model", "Site", "AP Port", "Speed (Mbps)", "Duplex", "Switch Name", "Switch IP", "Switch Port", "Switch Port Description", "Clients"],
+        rows.map(ap => [
+          ap.name ?? "",
+          ap.mac ?? "",
+          ap.ip ?? "",
+          ap.model ?? "",
+          ap.site_name ?? "",
+          ap.ap_port ?? "eth0",
+          ap.speed ?? "",
+          ap.duplex ?? "",
+          ap.switch_name ?? "",
+          ap.switch_ip ?? "",
+          ap.switch_port ?? "",
+          ap.switch_port_desc ?? "",
+          ap.num_clients ?? 0
+        ])
+      );
     }
     function renderSitesTable() {
       const tbody = document.getElementById("sitesBody");
@@ -206,6 +280,38 @@
       const rows = getFilteredSites();
       if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No matching sites found.</td></tr>'; return; }
       tbody.innerHTML = rows.map(s => `<tr><td>${escapeHtml(s.name)}</td><td class="num" style="color:var(--eduroam);font-weight:600;">${fmtNum(s.eduroam_users)}</td><td class="num">${fmtNum(s.other_users)}</td><td class="num"><strong>${fmtNum(s.total_users)}</strong></td><td class="num"><span class="pill ok">${s.aps_online}</span> ${s.aps_offline > 0 ? `<span class="pill bad">${s.aps_offline}</span>` : `<span class="meta-text">/ 0</span>`}</td><td class="num">${s.avg_rssi !== null ? s.avg_rssi + " dBm" : "--"}</td></tr>`).join("");
+    }
+    function renderSlowApsTable() {
+      const tbody = document.getElementById("slowApsBody");
+      const badge = document.getElementById("slowApsBadge");
+      if (!latestData) return;
+      const totalSlow = (latestData.slow_aps || []).length;
+      badge.textContent = totalSlow === 0 ? "All APs ≥ 1 Gbps" : `${fmtNum(totalSlow)} AP${totalSlow === 1 ? "" : "s"} < 1 Gbps`;
+      badge.className = `pill ${totalSlow === 0 ? "ok" : "warn"}`;
+      const rows = getFilteredSlowAps();
+      if (!totalSlow) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty" style="color:var(--green);">All online access points are negotiated at 1 Gbps or higher (Full Duplex).</td></tr>';
+        return;
+      }
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No matching access points found.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(ap => {
+        const pillCls = (ap.speed <= 10 || ap.full_duplex === false) ? "bad" : "warn";
+        const apMeta = [ap.model, ap.ip || ap.mac].filter(Boolean).join(" · ");
+        const swMeta = ap.switch_ip ? `<span class="sub-cell">${escapeHtml(ap.switch_ip)}</span>` : "";
+        const portDesc = ap.switch_port_desc ? `<span class="sub-cell">${escapeHtml(ap.switch_port_desc)}</span>` : "";
+        return `<tr>
+          <td><strong>${escapeHtml(ap.name)}</strong>${apMeta ? `<span class="sub-cell">${escapeHtml(apMeta)}</span>` : ""}</td>
+          <td>${escapeHtml(ap.site_name)}</td>
+          <td><code>${escapeHtml(ap.ap_port || "eth0")}</code></td>
+          <td><span class="pill ${pillCls}">${escapeHtml(ap.speed_label || (ap.speed + " Mbps"))} · ${escapeHtml(ap.duplex || "Auto")} Duplex</span></td>
+          <td><strong>${escapeHtml(ap.switch_name || "Unknown Switch")}</strong>${swMeta}</td>
+          <td><code>${escapeHtml(ap.switch_port || "Unknown Port")}</code>${portDesc}</td>
+          <td class="num"><strong>${fmtNum(ap.num_clients)}</strong></td>
+        </tr>`;
+      }).join("");
     }
     function renderCharts(data) {
       if (typeof Chart === "undefined") return;
@@ -230,9 +336,11 @@
       document.getElementById("kpiTotal").textContent = fmtNum(sum.total_wireless_users);
       document.getElementById("kpiTotalSub").textContent = `${fmtNum(sum.other_wireless_users)} on non-eduroam SSIDs`;
       document.getElementById("kpiAps").textContent = `${fmtNum(sum.aps_online)} / ${fmtNum(sum.aps_total)}`;
-      document.getElementById("kpiApsSub").textContent = sum.aps_offline > 0 ? `${sum.aps_offline} AP(s) offline` : "All APs connected";
+      const apSubParts = [sum.aps_offline > 0 ? `${sum.aps_offline} offline` : "All APs connected"];
+      if (sum.slow_aps_count > 0) apSubParts.push(`${sum.slow_aps_count} < 1 Gbps`);
+      document.getElementById("kpiApsSub").textContent = apSubParts.join(" · ");
       document.getElementById("kpiRssi").textContent = sum.avg_rssi !== null && sum.avg_rssi !== undefined ? `${sum.avg_rssi} dBm` : "--";
-      renderSitesTable(); renderCharts(data);
+      renderSitesTable(); renderSlowApsTable(); renderCharts(data);
       const topAps = data.top_aps || [];
       document.getElementById("apsBody").innerHTML = topAps.length ? topAps.map(ap => `<tr><td>${escapeHtml(ap.name)}</td><td>${escapeHtml(ap.site_name)}</td><td class="num"><strong>${fmtNum(ap.num_clients)}</strong></td><td><span class="pill ${ap.status === "connected" ? "ok" : "bad"}">${escapeHtml(ap.status)}</span></td></tr>`).join("") : '<tr><td colspan="4" class="empty">No APs found.</td></tr>';
       const alarms = data.alarms || [];

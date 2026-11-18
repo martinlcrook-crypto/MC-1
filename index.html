@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mist EU Wireless &amp; eduroam Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b1120; --panel: #111a2e; --panel-alt: #16223b; --border: #233354;
+      --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --eduroam: #818cf8;
+      --green: #34d399; --amber: #fbbf24; --red: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.45; }
+    .container { max-width: 1380px; margin: 0 auto; padding: 24px 20px 48px; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+    .title-block h1 { margin: 0; font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }
+    .subtitle { margin-top: 4px; color: var(--muted); font-size: 0.9rem; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+    .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); }
+    .badge.readonly { color: var(--green); border-color: rgba(52, 211, 153, 0.35); }
+    .badge.region { color: var(--accent); border-color: rgba(56, 189, 248, 0.35); }
+    .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .meta-text { font-size: 0.82rem; color: var(--muted); }
+    button { background: var(--accent); color: #08101e; border: none; border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.85rem; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .error-banner { display: none; background: rgba(248, 113, 113, 0.12); border: 1px solid rgba(248, 113, 113, 0.45); color: #fecaca; padding: 12px 16px; border-radius: 10px; margin-bottom: 20px; font-size: 0.9rem; }
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 22px; }
+    .kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; }
+    .kpi-label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+    .kpi-value { font-size: 2.15rem; font-weight: 700; margin: 6px 0 4px; font-variant-numeric: tabular-nums; }
+    .kpi-sub { font-size: 0.84rem; color: var(--muted); }
+    .kpi-eduroam .kpi-value { color: var(--eduroam); }
+    .kpi-wireless .kpi-value { color: var(--accent); }
+    .kpi-aps .kpi-value { color: var(--green); }
+    .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-bottom: 22px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; }
+    .panel-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
+    .panel-title { font-size: 1rem; font-weight: 600; margin: 0; }
+    .chart-wrap { position: relative; height: 240px; }
+    .two-col { display: grid; grid-template-columns: 1.5fr 1fr; gap: 16px; margin-bottom: 22px; }
+    @media (max-width: 980px) { .two-col { grid-template-columns: 1fr; } }
+    input.search { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; font-size: 0.85rem; min-width: 210px; }
+    input.search:focus { outline: none; border-color: var(--accent); }
+    .table-wrap { overflow-x: auto; max-height: 440px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 10px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; position: sticky; top: 0; background: var(--panel); }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    tr:hover td { background: rgba(56, 189, 248, 0.05); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+    .pill.ok { background: rgba(52, 211, 153, 0.15); color: var(--green); }
+    .pill.warn { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
+    .pill.bad { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+    .alarm-list { display: flex; flex-direction: column; gap: 10px; max-height: 360px; overflow-y: auto; }
+    .alarm-item { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; }
+    .alarm-top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
+    .empty { color: var(--muted); font-size: 0.88rem; padding: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="title-block">
+        <h1 id="orgName">Mist Wireless &amp; eduroam Dashboard</h1>
+        <div class="subtitle">
+          <span class="badge readonly">READ-ONLY MODE</span>
+          <span class="badge region" id="apiHost">api.eu.mist.com</span>
+          <span id="siteSummaryMeta">Loading sites...</span>
+        </div>
+      </div>
+      <div class="controls">
+        <span class="meta-text" id="lastUpdated">Fetching...</span>
+        <button id="refreshBtn" onclick="loadStats(true)">Refresh Now</button>
+      </div>
+    </header>
+    <div id="errorBanner" class="error-banner"></div>
+    <section class="kpi-grid">
+      <div class="kpi-card kpi-eduroam">
+        <div class="kpi-label">eduroam Users (Live)</div>
+        <div class="kpi-value" id="kpiEduroam">--</div>
+        <div class="kpi-sub" id="kpiEduroamSub">--% of wireless users</div>
+      </div>
+      <div class="kpi-card kpi-wireless">
+        <div class="kpi-label">Total Wireless Users</div>
+        <div class="kpi-value" id="kpiTotal">--</div>
+        <div class="kpi-sub" id="kpiTotalSub">Across all sites</div>
+      </div>
+      <div class="kpi-card kpi-aps">
+        <div class="kpi-label">Access Points Online</div>
+        <div class="kpi-value" id="kpiAps">--</div>
+        <div class="kpi-sub" id="kpiApsSub">-- offline</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg Signal (RSSI)</div>
+        <div class="kpi-value" id="kpiRssi">--</div>
+        <div class="kpi-sub">Connected wireless clients</div>
+      </div>
+    </section>
+    <section class="charts-grid">
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">Users by SSID</h2></div><div class="chart-wrap"><canvas id="ssidChart"></canvas></div></div>
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">Wi-Fi Band Split</h2></div><div class="chart-wrap"><canvas id="bandChart"></canvas></div></div>
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">Top Sites (eduroam vs Other)</h2></div><div class="chart-wrap"><canvas id="siteChart"></canvas></div></div>
+    </section>
+    <section class="two-col">
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">All Sites Breakdown</h2>
+          <input id="siteFilter" class="search" type="search" placeholder="Filter sites..." oninput="renderSitesTable()" />
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Site</th><th class="num">eduroam</th><th class="num">Other</th><th class="num">Total Users</th><th class="num">APs Up / Down</th><th class="num">Avg RSSI</th></tr></thead>
+            <tbody id="sitesBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-header"><h2 class="panel-title">Top 10 Busiest APs</h2></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>AP Name</th><th>Site</th><th class="num">Clients</th><th>Status</th></tr></thead>
+            <tbody id="apsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <section class="two-col">
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">Recent Org Alarms (Last 24h)</h2></div><div id="alarmsList" class="alarm-list"></div></div>
+      <div class="panel"><div class="panel-header"><h2 class="panel-title">Offline Access Points</h2></div><div id="offlineApsList" class="alarm-list"></div></div>
+    </section>
+  </div>
+  <script>
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, countdown = 60;
+    function fmtNum(n) { return typeof n === "number" ? n.toLocaleString() : "--"; }
+    function escapeHtml(str) { return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    function renderSitesTable() {
+      const tbody = document.getElementById("sitesBody");
+      if (!latestData) return;
+      const q = (document.getElementById("siteFilter").value || "").trim().toLowerCase();
+      const rows = (latestData.sites || []).filter(s => s.name.toLowerCase().includes(q));
+      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No matching sites found.</td></tr>'; return; }
+      tbody.innerHTML = rows.map(s => `<tr><td>${escapeHtml(s.name)}</td><td class="num" style="color:var(--eduroam);font-weight:600;">${fmtNum(s.eduroam_users)}</td><td class="num">${fmtNum(s.other_users)}</td><td class="num"><strong>${fmtNum(s.total_users)}</strong></td><td class="num"><span class="pill ok">${s.aps_online}</span> ${s.aps_offline > 0 ? `<span class="pill bad">${s.aps_offline}</span>` : `<span class="meta-text">/ 0</span>`}</td><td class="num">${s.avg_rssi !== null ? s.avg_rssi + " dBm" : "--"}</td></tr>`).join("");
+    }
+    function renderCharts(data) {
+      if (typeof Chart === "undefined") return;
+      const palette = ["#818cf8", "#38bdf8", "#34d399", "#fbbf24", "#f472b6", "#a78bfa", "#94a3b8"];
+      const ssids = (data.ssids || []).slice(0, 7);
+      if (ssidChart) ssidChart.destroy();
+      ssidChart = new Chart(document.getElementById("ssidChart"), { type: "doughnut", data: { labels: ssids.map(x => x.name), datasets: [{ data: ssids.map(x => x.count), backgroundColor: palette, borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right", labels: { color: "#cbd5e1", boxWidth: 12 } } } } });
+      const bands = data.bands || {}, bandLabels = Object.keys(bands).filter(k => bands[k] > 0 || k !== "Other");
+      if (bandChart) bandChart.destroy();
+      bandChart = new Chart(document.getElementById("bandChart"), { type: "doughnut", data: { labels: bandLabels, datasets: [{ data: bandLabels.map(k => bands[k] || 0), backgroundColor: ["#fbbf24", "#38bdf8", "#34d399", "#64748b"], borderWidth: 0 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "right", labels: { color: "#cbd5e1", boxWidth: 12 } } } } });
+      const topSites = (data.sites || []).slice(0, 8);
+      if (siteChart) siteChart.destroy();
+      siteChart = new Chart(document.getElementById("siteChart"), { type: "bar", data: { labels: topSites.map(s => s.name), datasets: [{ label: "eduroam", data: topSites.map(s => s.eduroam_users), backgroundColor: "#818cf8" }, { label: "Other SSIDs", data: topSites.map(s => s.other_users), backgroundColor: "#38bdf8" }] }, options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { display: false } }, y: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } } }, plugins: { legend: { labels: { color: "#cbd5e1", boxWidth: 12 } } } } });
+    }
+    function renderDashboard(data) {
+      latestData = data; const sum = data.summary || {};
+      document.getElementById("orgName").textContent = `${data.org?.name || "Mist"} — Wireless & eduroam`;
+      document.getElementById("apiHost").textContent = (data.org?.api_host || "api.eu.mist.com").replace(/^https?:\/\//, "");
+      document.getElementById("siteSummaryMeta").textContent = `${fmtNum(sum.active_sites)} active / ${fmtNum(sum.total_sites)} total sites`;
+      document.getElementById("kpiEduroam").textContent = fmtNum(sum.eduroam_users);
+      document.getElementById("kpiEduroamSub").textContent = `${sum.eduroam_pct ?? 0}% of all wireless users`;
+      document.getElementById("kpiTotal").textContent = fmtNum(sum.total_wireless_users);
+      document.getElementById("kpiTotalSub").textContent = `${fmtNum(sum.other_wireless_users)} on non-eduroam SSIDs`;
+      document.getElementById("kpiAps").textContent = `${fmtNum(sum.aps_online)} / ${fmtNum(sum.aps_total)}`;
+      document.getElementById("kpiApsSub").textContent = sum.aps_offline > 0 ? `${sum.aps_offline} AP(s) offline` : "All APs connected";
+      document.getElementById("kpiRssi").textContent = sum.avg_rssi !== null && sum.avg_rssi !== undefined ? `${sum.avg_rssi} dBm` : "--";
+      renderSitesTable(); renderCharts(data);
+      const topAps = data.top_aps || [];
+      document.getElementById("apsBody").innerHTML = topAps.length ? topAps.map(ap => `<tr><td>${escapeHtml(ap.name)}</td><td>${escapeHtml(ap.site_name)}</td><td class="num"><strong>${fmtNum(ap.num_clients)}</strong></td><td><span class="pill ${ap.status === "connected" ? "ok" : "bad"}">${escapeHtml(ap.status)}</span></td></tr>`).join("") : '<tr><td colspan="4" class="empty">No APs found.</td></tr>';
+      const alarms = data.alarms || [];
+      document.getElementById("alarmsList").innerHTML = alarms.length ? alarms.map(a => { const sev = (a.severity || "").toLowerCase(); const cls = sev === "critical" ? "bad" : (sev === "warn" || sev === "warning" ? "warn" : "ok"); const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleString() : ""; return `<div class="alarm-item"><div class="alarm-top"><strong>${escapeHtml(a.site_name)} — ${escapeHtml(a.type)}</strong><span class="pill ${cls}">${escapeHtml(a.severity)}</span></div><div class="meta-text">${escapeHtml(a.text)} ${ts ? "· " + escapeHtml(ts) : ""}</div></div>`; }).join("") : '<div class="empty">No alarms in the last 24 hours.</div>';
+      const offline = data.offline_aps || [];
+      document.getElementById("offlineApsList").innerHTML = offline.length ? offline.map(ap => `<div class="alarm-item"><div class="alarm-top"><strong>${escapeHtml(ap.name)}</strong><span class="pill bad">${escapeHtml(ap.status)}</span></div><div class="meta-text">${escapeHtml(ap.site_name)} · ${escapeHtml(ap.model)} · ${escapeHtml(ap.mac)}</div></div>`).join("") : '<div class="empty" style="color:var(--green);">All access points are currently online.</div>';
+      const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "just now";
+      document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`;
+    }
+    async function loadStats(force = false) {
+      const btn = document.getElementById("refreshBtn"), banner = document.getElementById("errorBanner");
+      btn.disabled = true; banner.style.display = "none";
+      try {
+        const res = await fetch(force ? "/api/stats?refresh=1" : "/api/stats");
+        const data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        countdown = data.cache_ttl_seconds || 60; renderDashboard(data);
+        if (data.warnings && data.warnings.length) { banner.textContent = "Partial data notice: " + data.warnings.join(" | "); banner.style.display = "block"; }
+      } catch (err) { banner.textContent = "Error loading Mist data: " + err.message; banner.style.display = "block"; }
+      finally { btn.disabled = false; }
+    }
+    setInterval(() => {
+      countdown -= 1;
+      if (countdown <= 0) { countdown = 60; loadStats(false); }
+      else if (latestData) { const fetched = latestData.fetched_at ? new Date(latestData.fetched_at).toLocaleTimeString() : "just now"; document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`; }
+    }, 1000);
+    loadStats(false);
+  </script>
+</body>
+</html>

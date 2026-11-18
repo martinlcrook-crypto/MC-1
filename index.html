@@ -22,9 +22,13 @@
     .badge.region { color: var(--accent); border-color: rgba(56, 189, 248, 0.35); }
     .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .meta-text { font-size: 0.82rem; color: var(--muted); }
-    button { background: var(--accent); color: #08101e; border: none; border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.85rem; cursor: pointer; }
+    button { background: var(--accent); color: #08101e; border: none; border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: opacity 0.15s, background 0.15s, border-color 0.15s; }
     button:hover { opacity: 0.9; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.btn-secondary { background: var(--panel-alt); color: var(--text); border: 1px solid var(--border); }
+    button.btn-secondary:hover { border-color: var(--accent); }
+    button.btn-secondary.active { background: var(--eduroam); color: #08101e; border-color: var(--eduroam); }
+    .panel-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .error-banner { display: none; background: rgba(248, 113, 113, 0.12); border: 1px solid rgba(248, 113, 113, 0.45); color: #fecaca; padding: 12px 16px; border-radius: 10px; margin-bottom: 20px; font-size: 0.9rem; }
     .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 22px; }
     .kpi-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 18px 20px; }
@@ -57,6 +61,20 @@
     .alarm-item { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; }
     .alarm-top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
     .empty { color: var(--muted); font-size: 0.88rem; padding: 12px 0; }
+    /* TV / Wallboard Mode */
+    body.wallboard-mode .container { max-width: 100%; padding: 24px 36px; }
+    body.wallboard-mode .two-col,
+    body.wallboard-mode #refreshBtn,
+    body.wallboard-mode .badge { display: none !important; }
+    body.wallboard-mode .title-block h1 { font-size: 2rem; }
+    body.wallboard-mode .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 24px; margin-bottom: 28px; }
+    body.wallboard-mode .kpi-card { padding: 28px 32px; }
+    body.wallboard-mode .kpi-label { font-size: 1.05rem; letter-spacing: 0.06em; }
+    body.wallboard-mode .kpi-value { font-size: clamp(2.8rem, 4.2vw, 4rem); margin: 10px 0 8px; }
+    body.wallboard-mode .kpi-eduroam .kpi-value,
+    body.wallboard-mode .kpi-wireless .kpi-value { font-size: clamp(4rem, 7vw, 6.2rem); line-height: 1.05; }
+    body.wallboard-mode .kpi-sub { font-size: 1.1rem; }
+    body.wallboard-mode .chart-wrap { height: 320px; }
   </style>
 </head>
 <body>
@@ -72,6 +90,7 @@
       </div>
       <div class="controls">
         <span class="meta-text" id="lastUpdated">Fetching...</span>
+        <button id="wallboardBtn" class="btn-secondary" onclick="toggleWallboardMode()">TV / Wallboard Mode</button>
         <button id="refreshBtn" onclick="loadStats(true)">Refresh Now</button>
       </div>
     </header>
@@ -107,7 +126,10 @@
       <div class="panel">
         <div class="panel-header">
           <h2 class="panel-title">All Sites Breakdown</h2>
-          <input id="siteFilter" class="search" type="search" placeholder="Filter sites..." oninput="renderSitesTable()" />
+          <div class="panel-actions">
+            <input id="siteFilter" class="search" type="search" placeholder="Filter sites..." oninput="renderSitesTable()" />
+            <button id="exportCsvBtn" class="btn-secondary" onclick="exportSitesCsv()">Export CSV</button>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
@@ -135,11 +157,53 @@
     let latestData = null, ssidChart = null, bandChart = null, siteChart = null, countdown = 60;
     function fmtNum(n) { return typeof n === "number" ? n.toLocaleString() : "--"; }
     function escapeHtml(str) { return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    function getFilteredSites() {
+      if (!latestData) return [];
+      const q = (document.getElementById("siteFilter")?.value || "").trim().toLowerCase();
+      return (latestData.sites || []).filter(s => (s.name || "").toLowerCase().includes(q));
+    }
+    function toggleWallboardMode() {
+      const active = document.body.classList.toggle("wallboard-mode");
+      const btn = document.getElementById("wallboardBtn");
+      btn.classList.toggle("active", active);
+      btn.textContent = active ? "Exit Wallboard" : "TV / Wallboard Mode";
+      if (latestData) setTimeout(() => renderCharts(latestData), 50);
+    }
+    function exportSitesCsv() {
+      const rows = getFilteredSites();
+      if (!rows.length) return;
+      const csvEscape = val => {
+        const s = String(val ?? "");
+        return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const headers = ["Site", "eduroam Users", "Other Users", "Total Users", "APs Online", "APs Offline", "Avg RSSI (dBm)"];
+      const lines = [
+        headers.map(csvEscape).join(","),
+        ...rows.map(s => [
+          s.name ?? "",
+          s.eduroam_users ?? 0,
+          s.other_users ?? 0,
+          s.total_users ?? 0,
+          s.aps_online ?? 0,
+          s.aps_offline ?? 0,
+          s.avg_rssi !== null && s.avg_rssi !== undefined ? s.avg_rssi : ""
+        ].map(csvEscape).join(","))
+      ];
+      const blob = new Blob([lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      a.href = url;
+      a.download = `mist-sites-${dateStamp}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
     function renderSitesTable() {
       const tbody = document.getElementById("sitesBody");
       if (!latestData) return;
-      const q = (document.getElementById("siteFilter").value || "").trim().toLowerCase();
-      const rows = (latestData.sites || []).filter(s => s.name.toLowerCase().includes(q));
+      const rows = getFilteredSites();
       if (!rows.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty">No matching sites found.</td></tr>'; return; }
       tbody.innerHTML = rows.map(s => `<tr><td>${escapeHtml(s.name)}</td><td class="num" style="color:var(--eduroam);font-weight:600;">${fmtNum(s.eduroam_users)}</td><td class="num">${fmtNum(s.other_users)}</td><td class="num"><strong>${fmtNum(s.total_users)}</strong></td><td class="num"><span class="pill ok">${s.aps_online}</span> ${s.aps_offline > 0 ? `<span class="pill bad">${s.aps_offline}</span>` : `<span class="meta-text">/ 0</span>`}</td><td class="num">${s.avg_rssi !== null ? s.avg_rssi + " dBm" : "--"}</td></tr>`).join("");
     }

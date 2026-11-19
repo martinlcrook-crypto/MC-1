@@ -40,12 +40,56 @@ _cache_data: Optional[Dict[str, Any]] = None
 _cache_timestamp: float = 0.0
 
 
-def mist_get(session: requests.Session, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
-    """Strictly read-only GET helper for the Juniper Mist API."""
+def mist_get_raw(
+    session: requests.Session, path: str, params: Optional[Dict[str, Any]] = None
+) -> Tuple[Any, Any]:
+    """Strictly read-only GET helper returning (parsed JSON, response headers)."""
     url = f"{MIST_API_HOST}{path}"
     resp = session.get(url, params=params, timeout=20)
     resp.raise_for_status()
-    return resp.json()
+    return resp.json(), resp.headers
+
+
+def mist_get(session: requests.Session, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """Strictly read-only GET helper for the Juniper Mist API."""
+    data, _ = mist_get_raw(session, path, params=params)
+    return data
+
+
+def _extract_item_key(item: Any, dedup_keys: Tuple[str, ...]) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    for key in dedup_keys:
+        val = item.get(key)
+        if val is not None:
+            norm = str(val).strip().lower()
+            if norm:
+                return f"{key}:{norm}"
+    return None
+
+
+def _parse_page_headers(headers: Any) -> Optional[Tuple[int, int, int]]:
+    if not headers:
+        return None
+    total_raw = headers.get("X-Page-Total")
+    limit_raw = headers.get("X-Page-Limit")
+    page_raw = headers.get("X-Page-Page")
+    if total_raw is None or limit_raw is None or page_raw is None:
+        return None
+    try:
+        total = int(total_raw)
+        page_limit = int(limit_raw)
+        page = int(page_raw)
+    except (TypeError, ValueError):
+        return None
+    if total < 0 or page_limit <= 0 or page < 1:
+        return None
+    return total, page_limit, page
+
+
+def _item_last_seen(item: Dict[str, Any]) -> float:
+    raw = item.get("last_seen")
+    return float(raw) if isinstance(raw, (int, float)) else 0.0
 
 
 def mist_get_paginated(
@@ -53,21 +97,63 @@ def mist_get_paginated(
     path: str,
     params: Optional[Dict[str, Any]] = None,
     limit: int = 1000,
-    max_pages: int = 10,
+    max_pages: int = 50,
+    send_page_params: bool = True,
+    dedup_keys: Tuple[str, ...] = ("mac", "id"),
 ) -> List[Dict[str, Any]]:
-    """Fetch paginated list endpoints safely."""
+    """Fetch Mist list endpoints safely without duplicating unpaginated responses."""
     items: List[Dict[str, Any]] = []
+    key_to_index: Dict[str, int] = {}
     base_params = dict(params or {})
-    base_params["limit"] = limit
+    effective_limit = limit
 
     for page in range(1, max_pages + 1):
-        base_params["page"] = page
-        data = mist_get(session, path, params=base_params)
-        if not isinstance(data, list):
+        req_params = dict(base_params)
+        if send_page_params:
+            req_params.setdefault("limit", effective_limit)
+            req_params["page"] = page
+        elif page > 1:
+            req_params.setdefault("limit", effective_limit)
+            req_params["page"] = page
+
+        data, headers = mist_get_raw(session, path, params=req_params)
+        if not isinstance(data, list) or not data:
             break
-        items.extend(data)
-        if len(data) < limit:
+
+        new_unique_count = 0
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            item_key = _extract_item_key(entry, dedup_keys)
+            if item_key is None:
+                items.append(entry)
+                new_unique_count += 1
+            elif item_key not in key_to_index:
+                key_to_index[item_key] = len(items)
+                items.append(entry)
+                new_unique_count += 1
+            else:
+                idx = key_to_index[item_key]
+                if _item_last_seen(entry) > _item_last_seen(items[idx]):
+                    items[idx] = entry
+
+        # If a subsequent page returned only duplicates, the endpoint ignored `page`
+        if page > 1 and new_unique_count == 0:
             break
+
+        page_meta = _parse_page_headers(headers)
+        if page_meta is not None:
+            total, page_limit, current_page = page_meta
+            effective_limit = page_limit
+            if current_page * page_limit >= total or len(items) >= total:
+                break
+        else:
+            # No Mist X-Page-* pagination headers: stop immediately for unpaginated endpoints,
+            # or when len(data) != requested limit (covers both short final pages and endpoints
+            # that ignore `limit` and return the entire list at once).
+            if not send_page_params or len(data) != int(req_params.get("limit", effective_limit)):
+                break
+
     return items
 
 
@@ -180,21 +266,82 @@ def fetch_site_telemetry(
     warning: Optional[str] = None
 
     try:
-        clients = mist_get_paginated(session, f"/api/v1/sites/{site_id}/stats/clients")
-    except Exception as exc:
-        warning = f"Clients fetch failed for {site_name}: {exc}"
-
-    try:
         aps = mist_get_paginated(
             session,
             f"/api/v1/sites/{site_id}/stats/devices",
             params={"type": "ap"},
+            limit=1000,
+            send_page_params=True,
+            dedup_keys=("mac", "id"),
         )
     except Exception as exc:
-        err = f"AP stats fetch failed for {site_name}: {exc}"
+        warning = f"AP stats fetch failed for {site_name}: {exc}"
+
+    site_ap_clients = sum(
+        int(ap.get("num_clients") or 0)
+        for ap in aps
+        if str(ap.get("status") or "").lower() == "connected"
+    )
+
+    try:
+        # /api/v1/sites/{site_id}/stats/clients returns live connected clients and does NOT
+        # support `page` pagination; sending page=1..N causes Mist to repeat the same list.
+        clients = mist_get_paginated(
+            session,
+            f"/api/v1/sites/{site_id}/stats/clients",
+            params={"wired": "false"},
+            send_page_params=False,
+            dedup_keys=("mac", "id"),
+        )
+        # Guard against Mist silently capping at default limit=100 without X-Page-* headers
+        if len(clients) == 100 and site_ap_clients > 100:
+            expanded = mist_get_paginated(
+                session,
+                f"/api/v1/sites/{site_id}/stats/clients",
+                params={"wired": "false", "limit": max(10000, site_ap_clients * 2)},
+                send_page_params=False,
+                dedup_keys=("mac", "id"),
+            )
+            if len(expanded) > len(clients):
+                clients = expanded
+        # Exclude any wired client records defensively
+        clients = [
+            c
+            for c in clients
+            if isinstance(c, dict) and c.get("wired") is not True and c.get("is_wired") is not True
+        ]
+    except Exception as exc:
+        err = f"Clients fetch failed for {site_name}: {exc}"
         warning = f"{warning}; {err}" if warning else err
 
     return site_id, clients, aps, warning
+
+
+def deduplicate_org_clients(
+    site_map: Dict[str, Dict[str, Any]],
+    site_clients: Dict[str, List[Dict[str, Any]]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Ensure each client MAC is counted at most once across the org (newest last_seen wins)."""
+    best_by_mac: Dict[str, Tuple[float, str, Dict[str, Any]]] = {}
+    unkeyed_by_site: Dict[str, List[Dict[str, Any]]] = {}
+
+    for site_id in sorted(site_map.keys()):
+        for client in site_clients.get(site_id, []):
+            mac = str(client.get("mac") or "").strip().lower()
+            if not mac:
+                unkeyed_by_site.setdefault(site_id, []).append(client)
+                continue
+            last_seen = _item_last_seen(client)
+            prev = best_by_mac.get(mac)
+            if prev is None or last_seen > prev[0]:
+                best_by_mac[mac] = (last_seen, site_id, client)
+
+    deduped: Dict[str, List[Dict[str, Any]]] = {
+        sid: list(unkeyed_by_site.get(sid, [])) for sid in site_map
+    }
+    for _, chosen_site_id, client_obj in best_by_mac.values():
+        deduped[chosen_site_id].append(client_obj)
+    return deduped
 
 
 def collect_mist_snapshot() -> Dict[str, Any]:
@@ -212,9 +359,13 @@ def collect_mist_snapshot() -> Dict[str, Any]:
     warnings: List[str] = []
 
     org_info = mist_get(session, f"/api/v1/orgs/{MIST_ORG_ID}")
-    sites_raw = mist_get(session, f"/api/v1/orgs/{MIST_ORG_ID}/sites")
-    if not isinstance(sites_raw, list):
-        sites_raw = []
+    sites_raw = mist_get_paginated(
+        session,
+        f"/api/v1/orgs/{MIST_ORG_ID}/sites",
+        limit=1000,
+        send_page_params=True,
+        dedup_keys=("id",),
+    )
 
     site_map: Dict[str, Dict[str, Any]] = {
         s["id"]: s for s in sites_raw if isinstance(s, dict) and s.get("id")
@@ -235,6 +386,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 site_aps[site_id] = aps
                 if warn:
                     warnings.append(warn)
+
+    site_clients = deduplicate_org_clients(site_map, site_clients)
 
     alarms: List[Dict[str, Any]] = []
     try:
@@ -261,6 +414,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         warnings.append(f"Alarms unavailable: {exc}")
 
     total_wireless_users = 0
+    total_ap_reported_clients = 0
     total_eduroam_users = 0
     total_uop_visitor_users = 0
     total_uop_connect_users = 0
@@ -316,6 +470,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
 
         site_aps_on = 0
         site_aps_off = 0
+        site_ap_clients = 0
         for ap in aps:
             status = str(ap.get("status") or "").lower()
             is_online = status == "connected"
@@ -328,6 +483,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             if is_online:
                 aps_online += 1
                 site_aps_on += 1
+                site_ap_clients += ap_clients
+                total_ap_reported_clients += ap_clients
                 for degraded in extract_ap_uplink_info(ap):
                     slow_aps.append(
                         {
@@ -371,6 +528,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 "id": site_id,
                 "name": site_name,
                 "total_users": site_total,
+                "ap_reported_clients": site_ap_clients,
                 "eduroam_users": site_eduroam,
                 "uop_visitor_users": site_uop_visitor,
                 "uop_connect_users": site_uop_connect,
@@ -411,6 +569,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         },
         "summary": {
             "total_wireless_users": total_wireless_users,
+            "ap_reported_clients": total_ap_reported_clients,
             "eduroam_users": total_eduroam_users,
             "eduroam_pct": pct(total_eduroam_users),
             "uop_visitor_users": total_uop_visitor_users,

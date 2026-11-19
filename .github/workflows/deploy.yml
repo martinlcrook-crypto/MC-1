@@ -145,8 +145,9 @@ jobs:
 
           # Optional: keep DuckDNS updated every 5 minutes if secrets are configured
           if [ -n "$DUCKDNS_DOMAIN" ] && [ -n "$DUCKDNS_TOKEN" ]; then
-            CLEAN_DOMAIN="$(printf '%s' "$DUCKDNS_DOMAIN" | sed -E 's#^https?://##; s#/.*$##; s#\.duckdns\.org$##')"
-            printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$DUCKDNS_TOKEN" > .duckdns.curl
+            CLEAN_DOMAIN="$(printf '%s' "$DUCKDNS_DOMAIN" | tr -d '\r\n[:space:]' | sed -E 's#^https?://##; s#/.*$##; s#\.duckdns\.org$##')"
+            CLEAN_TOKEN="$(printf '%s' "$DUCKDNS_TOKEN" | tr -d '\r\n[:space:]')"
+            printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$CLEAN_TOKEN" > .duckdns.curl
             chmod 600 .duckdns.curl
 
             sudo tee /etc/systemd/system/duckdns-update.service >/dev/null <<'UNIT'

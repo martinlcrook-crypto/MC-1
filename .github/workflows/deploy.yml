@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -13,6 +14,8 @@ jobs:
         env:
           MIST_ORG_ID: ${{ secrets.MIST_ORG_ID }}
           MIST_API_TOKEN: ${{ secrets.MIST_API_TOKEN }}
+          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
         run: |
           set -e
           cd /home/ec2-user/MC-1
@@ -23,7 +26,7 @@ jobs:
             printf 'MIST_ORG_ID=%s\n' "$MIST_ORG_ID"
             printf 'MIST_API_TOKEN=%s\n' "$MIST_API_TOKEN"
             printf 'CACHE_TTL_SECONDS=60\n'
-            printf 'PORT=8080\n'
+            printf 'PORT=80\n'
           } > .env
           chmod 600 .env
 
@@ -31,6 +34,10 @@ jobs:
             python3 -m venv .venv
           fi
           .venv/bin/pip install --quiet -r requirements.txt
+
+          # Allow ec2-user to bind port 80 cleanly across Amazon Linux 2 / 2023
+          printf 'net.ipv4.ip_unprivileged_port_start=80\n' | sudo tee /etc/sysctl.d/99-mist-http.conf >/dev/null
+          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
 
           sudo tee /etc/systemd/system/mist-dashboard.service >/dev/null <<'UNIT'
           [Unit]
@@ -43,7 +50,8 @@ jobs:
           User=ec2-user
           WorkingDirectory=/home/ec2-user/MC-1
           EnvironmentFile=/home/ec2-user/MC-1/.env
-          ExecStart=/home/ec2-user/MC-1/.venv/bin/waitress-serve --host=0.0.0.0 --port=8080 app:app
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          ExecStart=/home/ec2-user/MC-1/.venv/bin/waitress-serve --listen=0.0.0.0:80 --listen=0.0.0.0:8080 app:app
           Restart=always
           RestartSec=3
 
@@ -61,4 +69,44 @@ jobs:
           sudo systemctl enable mist-dashboard
           sudo systemctl restart mist-dashboard
           sleep 2
+          curl -sf http://127.0.0.1:80/health
           curl -sf http://127.0.0.1:8080/health
+
+          # Optional: keep DuckDNS updated every 5 minutes if secrets are configured
+          if [ -n "$DUCKDNS_DOMAIN" ] && [ -n "$DUCKDNS_TOKEN" ]; then
+            CLEAN_DOMAIN="${DUCKDNS_DOMAIN%.duckdns.org}"
+            printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$DUCKDNS_TOKEN" > .duckdns.curl
+            chmod 600 .duckdns.curl
+
+            sudo tee /etc/systemd/system/duckdns-update.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=Update DuckDNS Dynamic DNS Record
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          User=ec2-user
+          ExecStart=/usr/bin/env curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl
+          UNIT
+
+            sudo tee /etc/systemd/system/duckdns-update.timer >/dev/null <<'UNIT'
+          [Unit]
+          Description=Run DuckDNS Update every 5 minutes
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=5min
+          Unit=duckdns-update.service
+
+          [Install]
+          WantedBy=timers.target
+          UNIT
+
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now duckdns-update.timer
+            sudo systemctl start duckdns-update.service
+            echo "DuckDNS auto-update configured for ${CLEAN_DOMAIN}.duckdns.org"
+          else
+            echo "Skipping DuckDNS timer (set DUCKDNS_DOMAIN and DUCKDNS_TOKEN GitHub Secrets to enable)."
+          fi

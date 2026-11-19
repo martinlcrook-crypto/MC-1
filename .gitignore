@@ -1,0 +1,6 @@
+.env
+.duckdns*
+.venv/
+__pycache__/
+*.pyc
+app.pid

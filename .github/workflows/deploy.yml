@@ -14,8 +14,8 @@ jobs:
         env:
           MIST_ORG_ID: ${{ secrets.MIST_ORG_ID }}
           MIST_API_TOKEN: ${{ secrets.MIST_API_TOKEN }}
-          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN }}
-          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN }}
+          DUCKDNS_DOMAIN: ${{ secrets.DUCKDNS_DOMAIN || secrets.DUCK_DNS }}
+          DUCKDNS_TOKEN: ${{ secrets.DUCKDNS_TOKEN || secrets.DUCK_DNS_TOKEN }}
         run: |
           set -e
           cd /home/ec2-user/MC-1
@@ -145,7 +145,7 @@ jobs:
 
           # Optional: keep DuckDNS updated every 5 minutes if secrets are configured
           if [ -n "$DUCKDNS_DOMAIN" ] && [ -n "$DUCKDNS_TOKEN" ]; then
-            CLEAN_DOMAIN="${DUCKDNS_DOMAIN%.duckdns.org}"
+            CLEAN_DOMAIN="$(printf '%s' "$DUCKDNS_DOMAIN" | sed -E 's#^https?://##; s#/.*$##; s#\.duckdns\.org$##')"
             printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$DUCKDNS_TOKEN" > .duckdns.curl
             chmod 600 .duckdns.curl
 
@@ -176,8 +176,12 @@ jobs:
 
             sudo systemctl daemon-reload
             sudo systemctl enable --now duckdns-update.timer
-            sudo systemctl start duckdns-update.service
-            echo "DuckDNS auto-update configured for ${CLEAN_DOMAIN}.duckdns.org"
+            DUCK_RESP="$(curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl)"
+            echo "DuckDNS update response: ${DUCK_RESP}"
+            if [ "$DUCK_RESP" != "OK" ]; then
+              echo "DuckDNS update failed (expected OK, got: ${DUCK_RESP})" >&2
+              exit 1
+            fi
           else
-            echo "Skipping DuckDNS timer (set DUCKDNS_DOMAIN and DUCKDNS_TOKEN GitHub Secrets to enable)."
+            echo "Skipping DuckDNS timer (set DUCK_DNS and DUCK_DNS_TOKEN GitHub Secrets to enable)."
           fi

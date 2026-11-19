@@ -1,12 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import secrets
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory, session as flask_session
 import requests
 
 
@@ -24,6 +25,24 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+def load_or_create_secret_key(base_dir: Path) -> str:
+    env_key = os.getenv("FLASK_SECRET_KEY", "").strip()
+    if env_key:
+        return env_key
+    secret_file = base_dir / ".flask_secret"
+    try:
+        if secret_file.exists():
+            stored = secret_file.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+        generated = secrets.token_hex(32)
+        secret_file.write_text(generated + "\n", encoding="utf-8")
+        os.chmod(secret_file, 0o600)
+        return generated
+    except OSError:
+        return secrets.token_hex(32)
+
+
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -32,12 +51,29 @@ MIST_ORG_ID = os.getenv("MIST_ORG_ID", "").strip()
 MIST_API_TOKEN = os.getenv("MIST_API_TOKEN", "").strip()
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
 MIN_REFRESH_INTERVAL = 15
+AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "1").strip().lower() not in ("0", "false", "no")
+SESSION_LIFETIME_HOURS = int(os.getenv("SESSION_LIFETIME_HOURS", "12"))
+HTTPS_ENABLED = os.getenv("HTTPS_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
 app = Flask(__name__, static_folder=None)
+app.secret_key = load_or_create_secret_key(BASE_DIR)
+app.config["SESSION_COOKIE_NAME"] = "mist_dash_session"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = HTTPS_ENABLED
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=SESSION_LIFETIME_HOURS)
 
 _cache_lock = threading.Lock()
 _cache_data: Optional[Dict[str, Any]] = None
 _cache_timestamp: float = 0.0
+
+_auth_lock = threading.Lock()
+_pending_2fa: Dict[str, Dict[str, Any]] = {}
+_login_attempts: Dict[str, List[float]] = {}
+LOGIN_RATE_WINDOW_SECONDS = 300
+LOGIN_RATE_MAX_ATTEMPTS = 15
+TWO_FACTOR_CHALLENGE_TTL_SECONDS = 300
+TWO_FACTOR_MAX_ATTEMPTS = 5
 
 
 def mist_get_raw(
@@ -650,9 +686,349 @@ def collect_mist_snapshot() -> Dict[str, Any]:
     }
 
 
+def _client_ip() -> str:
+    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return fwd or (request.headers.get("X-Real-IP") or "").strip() or (request.remote_addr or "unknown")
+
+
+def _check_login_rate_limit(client_ip: str) -> bool:
+    """Return True if under rate limit, False if rate-limited."""
+    now = time.time()
+    cutoff = now - LOGIN_RATE_WINDOW_SECONDS
+    with _auth_lock:
+        recent = [ts for ts in _login_attempts.get(client_ip, []) if ts > cutoff]
+        if len(recent) >= LOGIN_RATE_MAX_ATTEMPTS:
+            _login_attempts[client_ip] = recent
+            return False
+        recent.append(now)
+        _login_attempts[client_ip] = recent
+        return True
+
+
+def _attach_mist_csrf(mist_sess: requests.Session) -> None:
+    """Attach Mist regional csrftoken* cookie as X-CSRFToken header."""
+    for cookie in mist_sess.cookies:
+        if cookie.name.startswith("csrftoken") and cookie.value:
+            mist_sess.headers["X-CSRFToken"] = cookie.value
+            return
+
+
+def _logout_mist_session(mist_sess: requests.Session) -> None:
+    """Best-effort cleanup of the ephemeral Mist auth session."""
+    try:
+        _attach_mist_csrf(mist_sess)
+        mist_sess.post(f"{MIST_API_HOST}/api/v1/logout", timeout=5)
+    except Exception:
+        pass
+    finally:
+        try:
+            mist_sess.close()
+        except Exception:
+            pass
+
+
+def _prune_expired_challenges() -> None:
+    now = time.time()
+    expired_sessions: List[requests.Session] = []
+    with _auth_lock:
+        expired_ids = [
+            cid
+            for cid, entry in _pending_2fa.items()
+            if now - entry.get("created_at", 0.0) > TWO_FACTOR_CHALLENGE_TTL_SECONDS
+        ]
+        for cid in expired_ids:
+            entry = _pending_2fa.pop(cid, None)
+            if entry and entry.get("session") is not None:
+                expired_sessions.append(entry["session"])
+    for sess in expired_sessions:
+        _logout_mist_session(sess)
+
+
+def _authorize_mist_user(
+    mist_sess: requests.Session, self_data: Dict[str, Any]
+) -> Tuple[bool, str]:
+    """Verify the authenticated Mist user has privileges for MIST_ORG_ID."""
+    if not MIST_ORG_ID:
+        return False, ""
+
+    privileges = self_data.get("privileges")
+    if isinstance(privileges, list):
+        org_roles: List[str] = []
+        for priv in privileges:
+            if not isinstance(priv, dict):
+                continue
+            if str(priv.get("org_id") or "").strip() == MIST_ORG_ID:
+                role = str(priv.get("role") or "user").strip()
+                scope = str(priv.get("scope") or "org").strip()
+                org_roles.append(f"{role} ({scope})" if scope != "org" else role)
+        if org_roles:
+            return True, org_roles[0]
+
+    # MSP-level admins may have access via msp_id without explicit org_id entry
+    try:
+        org_resp = mist_sess.get(f"{MIST_API_HOST}/api/v1/orgs/{MIST_ORG_ID}", timeout=15)
+        if org_resp.status_code == 200:
+            org_payload = org_resp.json()
+            if isinstance(org_payload, dict) and str(org_payload.get("id") or "") == MIST_ORG_ID:
+                msp_id = str(org_payload.get("msp_id") or "").strip()
+                if msp_id and isinstance(privileges, list):
+                    for priv in privileges:
+                        if isinstance(priv, dict) and str(priv.get("msp_id") or "").strip() == msp_id:
+                            return True, f"{priv.get('role', 'admin')} (msp)"
+                return True, "org"
+    except Exception:
+        pass
+
+    return False, ""
+
+
+def _current_user() -> Optional[Dict[str, Any]]:
+    email = flask_session.get("user_email")
+    if not email:
+        return None
+    return {
+        "email": email,
+        "name": flask_session.get("user_name") or email,
+        "role": flask_session.get("user_role") or "user",
+    }
+
+
+def _set_user_session(self_data: Dict[str, Any], role: str, fallback_email: str = "") -> Dict[str, Any]:
+    email = str(self_data.get("email") or fallback_email or "").strip()
+    first = str(self_data.get("first_name") or "").strip()
+    last = str(self_data.get("last_name") or "").strip()
+    full_name = " ".join(p for p in (first, last) if p) or email
+    flask_session.clear()
+    flask_session.permanent = True
+    flask_session["user_email"] = email
+    flask_session["user_name"] = full_name
+    flask_session["user_role"] = role or "user"
+    flask_session["auth_at"] = int(time.time())
+    return {"email": email, "name": full_name, "role": role or "user"}
+
+
+def _is_authenticated() -> bool:
+    if not AUTH_REQUIRED:
+        return True
+    return _current_user() is not None
+
+
+def _finalize_mist_login(
+    mist_sess: requests.Session, fallback_email: str = ""
+) -> Tuple[Any, int]:
+    """Check /api/v1/self on an authenticated Mist session, handle 2FA or issue dashboard session."""
+    _attach_mist_csrf(mist_sess)
+    self_resp = mist_sess.get(f"{MIST_API_HOST}/api/v1/self", timeout=15)
+    if self_resp.status_code != 200:
+        _logout_mist_session(mist_sess)
+        return jsonify({"error": "Failed to verify Mist account profile."}), 401
+
+    self_data = self_resp.json()
+    if not isinstance(self_data, dict):
+        _logout_mist_session(mist_sess)
+        return jsonify({"error": "Unexpected response from Mist /self endpoint."}), 502
+
+    if self_data.get("two_factor_required") is True and self_data.get("two_factor_passed") is False:
+        challenge_id = secrets.token_urlsafe(32)
+        with _auth_lock:
+            _pending_2fa[challenge_id] = {
+                "session": mist_sess,
+                "email": str(self_data.get("email") or fallback_email or "").strip(),
+                "created_at": time.time(),
+                "attempts": 0,
+            }
+        return jsonify(
+            {
+                "status": "two_factor_required",
+                "challenge_id": challenge_id,
+                "email": str(self_data.get("email") or fallback_email or "").strip(),
+            }
+        ), 200
+
+    authorized, role = _authorize_mist_user(mist_sess, self_data)
+    _logout_mist_session(mist_sess)
+
+    if not authorized:
+        return jsonify(
+            {"error": "Access denied: your Mist account is not authorised for this organisation."}
+        ), 403
+
+    user = _set_user_session(self_data, role, fallback_email=fallback_email)
+    return jsonify({"status": "authenticated", "user": user}), 200
+
+
+@app.get("/login")
+def login_page():
+    if _is_authenticated():
+        return redirect("/")
+    return send_from_directory(str(BASE_DIR), "login.html")
+
+
+@app.get("/api/auth/me")
+def api_auth_me():
+    user = _current_user()
+    resp = jsonify(
+        {
+            "auth_required": AUTH_REQUIRED,
+            "authenticated": _is_authenticated(),
+            "user": user,
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/auth/login")
+def api_auth_login():
+    _prune_expired_challenges()
+    if not _check_login_rate_limit(_client_ip()):
+        return jsonify({"error": "Too many sign-in attempts. Please wait a few minutes and try again."}), 429
+
+    payload = request.get_json(silent=True) or {}
+    email = str(payload.get("email") or "").strip()
+    password = str(payload.get("password") or "")
+    two_factor = str(payload.get("two_factor") or "").strip()
+
+    if not email or not password:
+        return jsonify({"error": "Email and password are required."}), 400
+    if not MIST_ORG_ID:
+        return jsonify({"error": "Server MIST_ORG_ID is not configured."}), 500
+
+    mist_sess = requests.Session()
+    mist_sess.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+
+    login_body: Dict[str, Any] = {"email": email, "password": password}
+    if two_factor:
+        login_body["two_factor"] = two_factor
+
+    try:
+        resp = mist_sess.post(f"{MIST_API_HOST}/api/v1/login", json=login_body, timeout=15)
+    except Exception:
+        mist_sess.close()
+        return jsonify({"error": "Could not reach Juniper Mist EU authentication service."}), 502
+
+    if resp.status_code != 200:
+        detail = "Invalid Mist email or password."
+        try:
+            err_json = resp.json()
+            if isinstance(err_json, dict) and err_json.get("detail"):
+                detail = str(err_json["detail"])
+        except Exception:
+            pass
+        mist_sess.close()
+        return jsonify({"error": detail}), 401
+
+    login_data = {}
+    try:
+        login_data = resp.json() if resp.content else {}
+    except Exception:
+        login_data = {}
+
+    _attach_mist_csrf(mist_sess)
+
+    # Check if Mist already indicated 2FA is required on the login response
+    if (
+        isinstance(login_data, dict)
+        and login_data.get("two_factor_required") is True
+        and login_data.get("two_factor_passed") is False
+    ):
+        challenge_id = secrets.token_urlsafe(32)
+        with _auth_lock:
+            _pending_2fa[challenge_id] = {
+                "session": mist_sess,
+                "email": str(login_data.get("email") or email).strip(),
+                "created_at": time.time(),
+                "attempts": 0,
+            }
+        return jsonify(
+            {
+                "status": "two_factor_required",
+                "challenge_id": challenge_id,
+                "email": str(login_data.get("email") or email).strip(),
+            }
+        ), 200
+
+    try:
+        return _finalize_mist_login(mist_sess, fallback_email=email)
+    except Exception:
+        _logout_mist_session(mist_sess)
+        return jsonify({"error": "Could not verify Mist organisation membership."}), 502
+
+
+@app.post("/api/auth/two-factor")
+def api_auth_two_factor():
+    _prune_expired_challenges()
+    if not _check_login_rate_limit(_client_ip()):
+        return jsonify({"error": "Too many verification attempts. Please wait a few minutes and try again."}), 429
+
+    payload = request.get_json(silent=True) or {}
+    challenge_id = str(payload.get("challenge_id") or "").strip()
+    two_factor = str(payload.get("two_factor") or "").strip().replace(" ", "")
+
+    if not challenge_id or not two_factor:
+        return jsonify({"error": "Verification code is required."}), 400
+
+    expired_session: Optional[requests.Session] = None
+    with _auth_lock:
+        entry = _pending_2fa.get(challenge_id)
+        if not entry:
+            return jsonify({"error": "Your 2FA session has expired. Please sign in again."}), 410
+        if entry["attempts"] >= TWO_FACTOR_MAX_ATTEMPTS:
+            expired_entry = _pending_2fa.pop(challenge_id, None)
+            if expired_entry:
+                expired_session = expired_entry.get("session")
+        else:
+            entry["attempts"] += 1
+            mist_sess = entry["session"]
+            email = entry.get("email", "")
+
+    if expired_session is not None:
+        _logout_mist_session(expired_session)
+        return jsonify({"error": "Too many invalid 2FA codes. Please sign in again."}), 410
+
+    _attach_mist_csrf(mist_sess)
+    try:
+        tf_resp = mist_sess.post(
+            f"{MIST_API_HOST}/api/v1/login/two_factor",
+            json={"two_factor": two_factor},
+            timeout=15,
+        )
+    except Exception:
+        return jsonify({"error": "Could not reach Juniper Mist EU 2FA service."}), 502
+
+    if tf_resp.status_code != 200:
+        detail = "Invalid 2FA verification code. Please try again."
+        try:
+            err_json = tf_resp.json()
+            if isinstance(err_json, dict) and err_json.get("detail"):
+                detail = str(err_json["detail"])
+        except Exception:
+            pass
+        return jsonify({"error": detail}), 401
+
+    with _auth_lock:
+        _pending_2fa.pop(challenge_id, None)
+
+    try:
+        return _finalize_mist_login(mist_sess, fallback_email=email)
+    except Exception:
+        _logout_mist_session(mist_sess)
+        return jsonify({"error": "Could not verify Mist organisation membership."}), 502
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout():
+    flask_session.clear()
+    return jsonify({"ok": True})
+
+
 @app.get("/")
 def index():
-    return send_from_directory(str(BASE_DIR), "index.html")
+    if not _is_authenticated():
+        return redirect("/login")
+    resp = send_from_directory(str(BASE_DIR), "index.html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.get("/health")
@@ -661,6 +1037,7 @@ def health():
         {
             "ok": True,
             "read_only": True,
+            "auth_required": AUTH_REQUIRED,
             "api_host": MIST_API_HOST,
             "configured": bool(MIST_ORG_ID and MIST_API_TOKEN),
         }
@@ -670,6 +1047,9 @@ def health():
 @app.get("/api/stats")
 def api_stats():
     global _cache_data, _cache_timestamp
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+
     force_refresh = request.args.get("refresh") == "1"
     now = time.time()
 
@@ -683,7 +1063,10 @@ def api_stats():
             payload = dict(_cache_data)
             payload["cached"] = True
             payload["cache_age_seconds"] = int(cache_age)
-            return jsonify(payload)
+            payload["auth_user"] = _current_user()
+            resp = jsonify(payload)
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
 
     try:
         fresh_data = collect_mist_snapshot()
@@ -702,7 +1085,10 @@ def api_stats():
     payload = dict(fresh_data)
     payload["cached"] = False
     payload["cache_age_seconds"] = 0
-    return jsonify(payload)
+    payload["auth_user"] = _current_user()
+    resp = jsonify(payload)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 if __name__ == "__main__":

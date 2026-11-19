@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sign In — Mist EU Wireless Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b1120; --panel: #111a2e; --panel-alt: #16223b; --border: #233354;
+      --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --eduroam: #818cf8;
+      --green: #34d399; --amber: #fbbf24; --red: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(circle at top, #13203b 0%, var(--bg) 60%);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 30px 28px 26px;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    }
+    .badge-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--panel-alt);
+    }
+    .badge.region { color: var(--accent); border-color: rgba(56, 189, 248, 0.35); }
+    .badge.readonly { color: var(--green); border-color: rgba(52, 211, 153, 0.35); }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      margin: 0 0 22px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .http-warn {
+      display: none;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px solid rgba(251, 191, 36, 0.4);
+      color: #fde68a;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 0.8rem;
+      margin-bottom: 16px;
+    }
+    .error-box {
+      display: none;
+      background: rgba(248, 113, 113, 0.12);
+      border: 1px solid rgba(248, 113, 113, 0.45);
+      color: #fecaca;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+    .field { margin-bottom: 16px; }
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--muted);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    input {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 11px 13px;
+      font-size: 0.95rem;
+      transition: border-color 0.15s;
+    }
+    input:focus { outline: none; border-color: var(--accent); }
+    .otp-input {
+      font-size: 1.35rem;
+      letter-spacing: 0.25em;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    button {
+      width: 100%;
+      background: var(--accent);
+      color: #08101e;
+      border: none;
+      border-radius: 10px;
+      padding: 11px 16px;
+      font-weight: 700;
+      font-size: 0.94rem;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.92; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.btn-link {
+      margin-top: 10px;
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 0.85rem;
+      padding: 9px 14px;
+    }
+    button.btn-link:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
+    .step { display: none; }
+    .step.active { display: block; }
+    .foot-note {
+      margin-top: 18px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge-row">
+      <span class="badge region">Mist EU Auth</span>
+      <span class="badge readonly">Authorised Org Users Only</span>
+    </div>
+    <h1>Mist Wireless Dashboard</h1>
+    <p class="subtitle">Sign in with your Juniper Mist email and password. Access is verified against your Mist organisation privileges.</p>
+
+    <div id="httpWarn" class="http-warn">
+      Connection is currently over plain HTTP. Enable HTTPS (port 443) before entering credentials over untrusted networks.
+    </div>
+    <div id="errorBox" class="error-box"></div>
+
+    <!-- Step 1: Mist Email & Password -->
+    <form id="loginForm" class="step active" onsubmit="handleLogin(event)">
+      <div class="field">
+        <label for="email">Mist Email</label>
+        <input id="email" name="email" type="email" autocomplete="username" required placeholder="name@port.ac.uk" />
+      </div>
+      <div class="field">
+        <label for="password">Mist Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your Mist password" />
+      </div>
+      <button id="loginBtn" type="submit">Sign In with Mist</button>
+    </form>
+
+    <!-- Step 2: Mist 2FA Code -->
+    <form id="twoFactorForm" class="step" onsubmit="handleTwoFactor(event)">
+      <p class="subtitle" id="twoFactorHint" style="margin-bottom:14px;">Enter the 6-digit verification code from your authenticator app.</p>
+      <div class="field">
+        <label for="twoFactorCode">2FA Verification Code</label>
+        <input id="twoFactorCode" name="two_factor" type="text" inputmode="numeric" pattern="[0-9A-Za-z -]{4,12}" autocomplete="one-time-code" required placeholder="123456" class="otp-input" />
+      </div>
+      <button id="twoFactorBtn" type="submit">Verify &amp; Continue</button>
+      <button type="button" class="btn-link" onclick="resetToLogin()">Back to Email &amp; Password</button>
+    </form>
+
+    <div class="foot-note">
+      Your Mist password is sent directly to <code>api.eu.mist.com</code> only to verify your identity and organisation membership; it is never stored on this server.
+    </div>
+  </div>
+
+  <script>
+    let pendingChallengeId = null;
+
+    if (window.location.protocol !== "https:" && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+      document.getElementById("httpWarn").style.display = "block";
+    }
+
+    function showError(msg) {
+      const box = document.getElementById("errorBox");
+      if (!msg) {
+        box.style.display = "none";
+        box.textContent = "";
+      } else {
+        box.textContent = msg;
+        box.style.display = "block";
+      }
+    }
+
+    function resetToLogin() {
+      pendingChallengeId = null;
+      showError("");
+      document.getElementById("twoFactorCode").value = "";
+      document.getElementById("twoFactorForm").classList.remove("active");
+      document.getElementById("loginForm").classList.add("active");
+      document.getElementById("password").value = "";
+      document.getElementById("password").focus();
+    }
+
+    async function handleLogin(ev) {
+      ev.preventDefault();
+      showError("");
+      const btn = document.getElementById("loginBtn");
+      const email = document.getElementById("email").value.trim();
+      const password = document.getElementById("password").value;
+      btn.disabled = true;
+      btn.textContent = "Verifying with Mist...";
+
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || `Sign-in failed (HTTP ${res.status})`);
+        }
+        if (data.status === "two_factor_required" && data.challenge_id) {
+          pendingChallengeId = data.challenge_id;
+          document.getElementById("twoFactorHint").textContent =
+            `Two-factor authentication is enabled for ${data.email || email}. Enter your verification code.`;
+          document.getElementById("loginForm").classList.remove("active");
+          document.getElementById("twoFactorForm").classList.add("active");
+          document.getElementById("twoFactorCode").focus();
+          return;
+        }
+        window.location.href = "/";
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Sign In with Mist";
+      }
+    }
+
+    async function handleTwoFactor(ev) {
+      ev.preventDefault();
+      showError("");
+      if (!pendingChallengeId) {
+        resetToLogin();
+        return;
+      }
+      const btn = document.getElementById("twoFactorBtn");
+      const code = document.getElementById("twoFactorCode").value.trim().replace(/\s+/g, "");
+      btn.disabled = true;
+      btn.textContent = "Verifying Code...";
+
+      try {
+        const res = await fetch("/api/auth/two-factor", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ challenge_id: pendingChallengeId, two_factor: code })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (res.status === 410) {
+            resetToLogin();
+          }
+          throw new Error(data.error || `2FA verification failed (HTTP ${res.status})`);
+        }
+        window.location.href = "/";
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Verify & Continue";
+      }
+    }
+  </script>
+</body>
+</html>

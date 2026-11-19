@@ -141,7 +141,6 @@
         <div class="subtitle">
           <span class="badge readonly">READ-ONLY MODE</span>
           <span class="badge region" id="apiHost">api.eu.mist.com</span>
-          <span id="siteSummaryMeta">Loading sites...</span>
         </div>
       </div>
       <div class="controls">
@@ -789,7 +788,6 @@
       latestData = data; const sum = data.summary || {};
       document.getElementById("orgName").textContent = `${data.org?.name || "Mist"} — Wireless & eduroam`;
       document.getElementById("apiHost").textContent = (data.org?.api_host || "api.eu.mist.com").replace(/^https?:\/\//, "");
-      document.getElementById("siteSummaryMeta").textContent = `${fmtNum(sum.active_sites)} active / ${fmtNum(sum.total_sites)} total sites`;
 
       document.getElementById("kpiTotal").textContent = fmtNum(sum.total_wireless_users);
       document.getElementById("kpiTotalSub").textContent = `${fmtNum(sum.other_wireless_users ?? 0)} on other SSIDs`;

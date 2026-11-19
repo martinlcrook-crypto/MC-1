@@ -143,10 +143,11 @@ jobs:
           curl -sf http://127.0.0.1:8080/health
           curl -sf http://127.0.0.1:80/health || { sudo journalctl -u mist-dashboard -n 20 --no-pager || true; exit 1; }
 
-          # Optional: keep DuckDNS updated every 5 minutes if secrets are configured
-          if [ -n "$DUCKDNS_DOMAIN" ] && [ -n "$DUCKDNS_TOKEN" ]; then
-            CLEAN_DOMAIN="$(printf '%s' "$DUCKDNS_DOMAIN" | tr -d '\r\n[:space:]' | sed -E 's#^https?://##; s#/.*$##; s#\.duckdns\.org$##')"
+          # Keep DuckDNS (mc-uop-mist.duckdns.org) updated every 5 minutes when token is configured
+          if [ -n "$DUCKDNS_TOKEN" ]; then
+            CLEAN_DOMAIN="mc-uop-mist"
             CLEAN_TOKEN="$(printf '%s' "$DUCKDNS_TOKEN" | tr -d '\r\n[:space:]')"
+            echo "Configuring DuckDNS for ${CLEAN_DOMAIN}.duckdns.org (token length: ${#CLEAN_TOKEN})"
             printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$CLEAN_TOKEN" > .duckdns.curl
             chmod 600 .duckdns.curl
 
@@ -180,9 +181,9 @@ jobs:
             DUCK_RESP="$(curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl)"
             echo "DuckDNS update response: ${DUCK_RESP}"
             if [ "$DUCK_RESP" != "OK" ]; then
-              echo "DuckDNS update failed (expected OK, got: ${DUCK_RESP})" >&2
+              echo "DuckDNS update failed (expected OK, got: ${DUCK_RESP}; check DUCK_DNS_TOKEN — expected 36-char UUID)" >&2
               exit 1
             fi
           else
-            echo "Skipping DuckDNS timer (set DUCK_DNS and DUCK_DNS_TOKEN GitHub Secrets to enable)."
+            echo "Skipping DuckDNS timer (set DUCK_DNS_TOKEN GitHub Secret to enable)."
           fi

@@ -21,19 +21,53 @@ jobs:
           cd /home/ec2-user/MC-1
           git pull origin main
 
-          {
-            printf 'MIST_API_HOST=https://api.eu.mist.com\n'
-            printf 'MIST_ORG_ID=%s\n' "$MIST_ORG_ID"
-            printf 'MIST_API_TOKEN=%s\n' "$MIST_API_TOKEN"
-            printf 'CACHE_TTL_SECONDS=60\n'
-            printf 'PORT=80\n'
-          } > .env
-          chmod 600 .env
+          CLEAN_DOMAIN="mc-uop-mist"
+          FQDN="${CLEAN_DOMAIN}.duckdns.org"
+          CLEAN_TOKEN=""
 
-          if [ ! -d .venv ]; then
-            python3 -m venv .venv
+          # Keep DuckDNS (mc-uop-mist.duckdns.org) updated every 5 minutes when token is configured
+          if [ -n "$DUCKDNS_TOKEN" ]; then
+            CLEAN_TOKEN="$(printf '%s' "$DUCKDNS_TOKEN" | tr -d '\r\n[:space:]')"
+            echo "Configuring DuckDNS for ${FQDN} (token length: ${#CLEAN_TOKEN})"
+            printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$CLEAN_TOKEN" > .duckdns.curl
+            chmod 600 .duckdns.curl
+
+            sudo tee /etc/systemd/system/duckdns-update.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=Update DuckDNS Dynamic DNS Record
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          User=ec2-user
+          ExecStart=/usr/bin/env curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl
+          UNIT
+
+            sudo tee /etc/systemd/system/duckdns-update.timer >/dev/null <<'UNIT'
+          [Unit]
+          Description=Run DuckDNS Update every 5 minutes
+
+          [Timer]
+          OnBootSec=1min
+          OnUnitActiveSec=5min
+          Unit=duckdns-update.service
+
+          [Install]
+          WantedBy=timers.target
+          UNIT
+
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now duckdns-update.timer
+            DUCK_RESP="$(curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl)"
+            echo "DuckDNS update response: ${DUCK_RESP}"
+            if [ "$DUCK_RESP" != "OK" ]; then
+              echo "DuckDNS update failed (expected OK, got: ${DUCK_RESP}; check DUCK_DNS_TOKEN — expected 36-char UUID)" >&2
+              exit 1
+            fi
+          else
+            echo "Skipping DuckDNS timer (set DUCK_DNS_TOKEN GitHub Secret to enable)."
           fi
-          .venv/bin/pip install --quiet -r requirements.txt
 
           # Keep mist-dashboard reliably serving on 8080 (or 80+8080 if port 80 is free)
           PORT80_OWNER=""
@@ -45,6 +79,117 @@ jobs:
             PORT80_OWNER="apache2"
           fi
           echo "Detected port 80 service: ${PORT80_OWNER:-none}"
+
+          # Provision & auto-renew Let's Encrypt TLS certificate via DuckDNS DNS-01
+          TLS_READY=0
+          CERT_FULLCHAIN="/etc/letsencrypt/live/${FQDN}/fullchain.pem"
+          CERT_PRIVKEY="/etc/letsencrypt/live/${FQDN}/privkey.pem"
+
+          if [ "$PORT80_OWNER" = "nginx" ] && [ -n "$CLEAN_TOKEN" ]; then
+            if [ ! -x .certbot-venv/bin/certbot ]; then
+              echo "Installing Certbot into .certbot-venv..."
+              python3 -m venv .certbot-venv
+              .certbot-venv/bin/pip install --quiet --upgrade pip
+              .certbot-venv/bin/pip install --quiet certbot
+            fi
+
+            sudo mkdir -p /etc/letsencrypt
+            printf '%s\n' "$CLEAN_TOKEN" | sudo tee /etc/letsencrypt/duckdns-token >/dev/null
+            sudo chmod 600 /etc/letsencrypt/duckdns-token
+
+            sudo tee /etc/letsencrypt/duckdns-auth.sh >/dev/null <<'HOOK'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          TOKEN="$(tr -d '\r\n[:space:]' < /etc/letsencrypt/duckdns-token)"
+          RESP="$(curl -fsS --get \
+            --data-urlencode "domains=mc-uop-mist" \
+            --data-urlencode "token=${TOKEN}" \
+            --data-urlencode "txt=${CERTBOT_VALIDATION}" \
+            "https://www.duckdns.org/update")"
+          if [ "$RESP" != "OK" ]; then
+            echo "DuckDNS TXT auth update failed: ${RESP}" >&2
+            exit 1
+          fi
+          sleep 35
+          HOOK
+
+            sudo tee /etc/letsencrypt/duckdns-cleanup.sh >/dev/null <<'HOOK'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          TOKEN="$(tr -d '\r\n[:space:]' < /etc/letsencrypt/duckdns-token)"
+          curl -fsS --get \
+            --data-urlencode "domains=mc-uop-mist" \
+            --data-urlencode "token=${TOKEN}" \
+            --data-urlencode "txt=removed" \
+            --data-urlencode "clear=true" \
+            "https://www.duckdns.org/update" >/dev/null || true
+          HOOK
+
+            sudo chmod 700 /etc/letsencrypt/duckdns-auth.sh /etc/letsencrypt/duckdns-cleanup.sh
+
+            if ! sudo test -f "$CERT_FULLCHAIN" || ! sudo test -f "$CERT_PRIVKEY"; then
+              echo "Requesting Let's Encrypt certificate for ${FQDN} via DuckDNS DNS-01..."
+              sudo /home/ec2-user/MC-1/.certbot-venv/bin/certbot certonly \
+                --non-interactive \
+                --agree-tos \
+                --register-unsafely-without-email \
+                --manual \
+                --preferred-challenges dns \
+                --manual-auth-hook /etc/letsencrypt/duckdns-auth.sh \
+                --manual-cleanup-hook /etc/letsencrypt/duckdns-cleanup.sh \
+                --keep-until-expiring \
+                -d "${FQDN}"
+            else
+              echo "Existing Let's Encrypt certificate found for ${FQDN}."
+            fi
+
+            if sudo test -f "$CERT_FULLCHAIN" && sudo test -f "$CERT_PRIVKEY"; then
+              TLS_READY=1
+
+              sudo tee /etc/systemd/system/certbot-renew.service >/dev/null <<'UNIT'
+          [Unit]
+          Description=Renew Let's Encrypt SSL Certificates
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=oneshot
+          ExecStart=/home/ec2-user/MC-1/.certbot-venv/bin/certbot renew --quiet --deploy-hook "systemctl reload nginx"
+          UNIT
+
+              sudo tee /etc/systemd/system/certbot-renew.timer >/dev/null <<'UNIT'
+          [Unit]
+          Description=Check Let's Encrypt certificate renewal twice daily
+
+          [Timer]
+          OnCalendar=*-*-* 03,15:17:00
+          RandomizedDelaySec=1800
+          Persistent=true
+          Unit=certbot-renew.service
+
+          [Install]
+          WantedBy=timers.target
+          UNIT
+
+              sudo systemctl daemon-reload
+              sudo systemctl enable --now certbot-renew.timer
+            fi
+          fi
+
+          {
+            printf 'MIST_API_HOST=https://api.eu.mist.com\n'
+            printf 'MIST_ORG_ID=%s\n' "$MIST_ORG_ID"
+            printf 'MIST_API_TOKEN=%s\n' "$MIST_API_TOKEN"
+            printf 'CACHE_TTL_SECONDS=60\n'
+            printf 'PORT=80\n'
+            printf 'HTTPS_ENABLED=%s\n' "$TLS_READY"
+          } > .env
+          chmod 600 .env
+
+          if [ ! -d .venv ]; then
+            python3 -m venv .venv
+          fi
+          .venv/bin/pip install --quiet -r requirements.txt
 
           if [ -z "$PORT80_OWNER" ]; then
             printf 'net.ipv4.ip_unprivileged_port_start=80\n' | sudo tee /etc/sysctl.d/99-mist-http.conf >/dev/null
@@ -90,7 +235,70 @@ jobs:
             fi
             NGINX_USER="$(awk '/^user[[:space:]]+/{gsub(/;/,"",$2); print $2; exit}' /etc/nginx/nginx.conf.orig || true)"
             NGINX_USER="${NGINX_USER:-nginx}"
-            sudo tee /etc/nginx/nginx.conf >/dev/null <<NGINX
+
+            if [ "$TLS_READY" = "1" ]; then
+              sudo tee /etc/nginx/nginx.conf >/dev/null <<NGINX
+          user ${NGINX_USER};
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+
+          events {
+            worker_connections 1024;
+          }
+
+          http {
+            include       /etc/nginx/mime.types;
+            default_type  application/octet-stream;
+            sendfile      on;
+            keepalive_timeout 65;
+
+            server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name ${FQDN} _;
+
+              location = /health {
+                proxy_pass http://127.0.0.1:8080/health;
+                proxy_http_version 1.1;
+                proxy_set_header Host \$host;
+              }
+
+              location / {
+                return 301 https://\$host\$request_uri;
+              }
+            }
+
+            server {
+              listen 443 ssl default_server;
+              listen [::]:443 ssl default_server;
+              server_name ${FQDN} _;
+
+              ssl_certificate     ${CERT_FULLCHAIN};
+              ssl_certificate_key ${CERT_PRIVKEY};
+              ssl_protocols       TLSv1.2 TLSv1.3;
+              ssl_prefer_server_ciphers off;
+              ssl_session_cache   shared:SSL:10m;
+              ssl_session_timeout 10m;
+
+              add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+              add_header X-Content-Type-Options "nosniff" always;
+              add_header X-Frame-Options "SAMEORIGIN" always;
+
+              location / {
+                proxy_pass http://127.0.0.1:8080;
+                proxy_http_version 1.1;
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_read_timeout 120s;
+              }
+            }
+          }
+          NGINX
+            else
+              sudo tee /etc/nginx/nginx.conf >/dev/null <<NGINX
           user ${NGINX_USER};
           worker_processes auto;
           error_log /var/log/nginx/error.log;
@@ -123,6 +331,8 @@ jobs:
             }
           }
           NGINX
+            fi
+
             sudo setsebool -P httpd_can_network_connect 1 2>/dev/null || true
             sudo nginx -t
             sudo systemctl reload nginx
@@ -139,51 +349,11 @@ jobs:
           fi
 
           sleep 2
-          sudo ss -tlnp '( sport = :80 or sport = :8080 )' || true
+          sudo ss -tlnp '( sport = :80 or sport = :443 or sport = :8080 )' || true
           curl -sf http://127.0.0.1:8080/health
           curl -sf http://127.0.0.1:80/health || { sudo journalctl -u mist-dashboard -n 20 --no-pager || true; exit 1; }
-
-          # Keep DuckDNS (mc-uop-mist.duckdns.org) updated every 5 minutes when token is configured
-          if [ -n "$DUCKDNS_TOKEN" ]; then
-            CLEAN_DOMAIN="mc-uop-mist"
-            CLEAN_TOKEN="$(printf '%s' "$DUCKDNS_TOKEN" | tr -d '\r\n[:space:]')"
-            echo "Configuring DuckDNS for ${CLEAN_DOMAIN}.duckdns.org (token length: ${#CLEAN_TOKEN})"
-            printf 'url = "https://www.duckdns.org/update?domains=%s&token=%s&ip="\n' "$CLEAN_DOMAIN" "$CLEAN_TOKEN" > .duckdns.curl
-            chmod 600 .duckdns.curl
-
-            sudo tee /etc/systemd/system/duckdns-update.service >/dev/null <<'UNIT'
-          [Unit]
-          Description=Update DuckDNS Dynamic DNS Record
-          After=network-online.target
-          Wants=network-online.target
-
-          [Service]
-          Type=oneshot
-          User=ec2-user
-          ExecStart=/usr/bin/env curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl
-          UNIT
-
-            sudo tee /etc/systemd/system/duckdns-update.timer >/dev/null <<'UNIT'
-          [Unit]
-          Description=Run DuckDNS Update every 5 minutes
-
-          [Timer]
-          OnBootSec=1min
-          OnUnitActiveSec=5min
-          Unit=duckdns-update.service
-
-          [Install]
-          WantedBy=timers.target
-          UNIT
-
-            sudo systemctl daemon-reload
-            sudo systemctl enable --now duckdns-update.timer
-            DUCK_RESP="$(curl -fsS -K /home/ec2-user/MC-1/.duckdns.curl)"
-            echo "DuckDNS update response: ${DUCK_RESP}"
-            if [ "$DUCK_RESP" != "OK" ]; then
-              echo "DuckDNS update failed (expected OK, got: ${DUCK_RESP}; check DUCK_DNS_TOKEN — expected 36-char UUID)" >&2
-              exit 1
-            fi
-          else
-            echo "Skipping DuckDNS timer (set DUCK_DNS_TOKEN GitHub Secret to enable)."
+          if [ "$TLS_READY" = "1" ]; then
+            curl -sf --resolve "${FQDN}:443:127.0.0.1" "https://${FQDN}/health"
+            echo ""
+            echo "HTTPS verified cleanly for https://${FQDN}/"
           fi

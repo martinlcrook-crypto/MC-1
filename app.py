@@ -1038,6 +1038,7 @@ def health():
             "ok": True,
             "read_only": True,
             "auth_required": AUTH_REQUIRED,
+            "https_enabled": HTTPS_ENABLED,
             "api_host": MIST_API_HOST,
             "configured": bool(MIST_ORG_ID and MIST_API_TOKEN),
         }

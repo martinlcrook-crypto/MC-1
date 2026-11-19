@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 app.pid
 .flask_secret
+.certbot-venv/

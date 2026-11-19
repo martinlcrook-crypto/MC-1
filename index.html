@@ -145,8 +145,11 @@
     .hist-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
     .hist-empty { display: none; text-align: center; padding: 64px 20px; color: var(--muted); font-size: 0.92rem; }
     body.wallboard-mode .hist-controls,
-    body.wallboard-mode #exportHistoryBtn { display: none !important; }
-    body.wallboard-mode #tab-history .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+    body.wallboard-mode .nac-controls,
+    body.wallboard-mode #exportHistoryBtn,
+    body.wallboard-mode #exportNacRejectsBtn { display: none !important; }
+    body.wallboard-mode #tab-history .kpi-grid,
+    body.wallboard-mode #tab-nac-rejects .kpi-grid { grid-template-columns: repeat(4, 1fr); }
   </style>
 </head>
 <body>
@@ -208,6 +211,10 @@
         <button class="nav-tab" data-tab="tab-ap-issues" onclick="switchTab('tab-ap-issues')">
           <span>APs &lt; 1Gb</span>
           <span id="navApIssuesCount" class="pill ok">0</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-nac-rejects" onclick="switchTab('tab-nac-rejects')">
+          <span>NAC Server Rejects</span>
+          <span id="navNacRejectsCount" class="pill neutral">--</span>
         </button>
         <button class="nav-tab" data-tab="tab-alarms" onclick="switchTab('tab-alarms')">
           <span>Recent Alarms</span>
@@ -463,7 +470,7 @@
           </div>
         </div>
 
-        <!-- TAB 5: RECENT ALARMS -->
+        <!-- TAB 6: RECENT ALARMS -->
         <div id="tab-alarms" class="tab-pane">
           <div class="panel">
             <div class="panel-header">
@@ -473,6 +480,74 @@
               </div>
             </div>
             <div id="alarmsList" class="alarm-list"></div>
+          </div>
+        </div>
+
+        <!-- TAB 7: NAC SERVER REJECTS -->
+        <div id="tab-nac-rejects" class="tab-pane">
+          <section class="kpi-grid">
+            <div class="kpi-card kpi-down-ok" id="kpiNacTotalCard">
+              <div class="kpi-label">Devices Rejected</div>
+              <div class="kpi-value" id="kpiNacTotal">--</div>
+              <div class="kpi-sub" id="kpiNacTotalSub">Last 24 hours</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Affected Switches</div>
+              <div class="kpi-value" id="kpiNacSwitches">--</div>
+              <div class="kpi-sub">Switches seeing rejects</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Affected Sites</div>
+              <div class="kpi-value" id="kpiNacSites">--</div>
+              <div class="kpi-sub">Sites seeing rejects</div>
+            </div>
+            <div class="kpi-card">
+              <div class="kpi-label">Top Reject Port Profile</div>
+              <div class="kpi-value" id="kpiNacTopProfile" style="font-size:1.35rem;line-height:1.25;">--</div>
+              <div class="kpi-sub" id="kpiNacTopProfileSub">--</div>
+            </div>
+          </section>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title">NAC Port Profile Server Rejects</h2>
+                <span id="nacRejectsBadge" class="pill neutral">Loading...</span>
+              </div>
+              <div class="panel-actions nac-controls">
+                <div class="filter-group">
+                  <button class="filter-btn" data-nac-dur="1h" onclick="setNacDuration('1h')">1h</button>
+                  <button class="filter-btn active" data-nac-dur="24h" onclick="setNacDuration('24h')">24h</button>
+                  <button class="filter-btn" data-nac-dur="7d" onclick="setNacDuration('7d')">7d</button>
+                </div>
+                <select id="nacProfileFilter" class="wb-select" title="Filter by NAC Port Profile" onchange="setNacProfileFilter(this.value)">
+                  <option value="all">All Port Profiles</option>
+                </select>
+                <input id="nacRejectsFilter" class="search" type="search" placeholder="Filter MAC, device, switch, port, user..." oninput="renderNacRejectsTable()" />
+                <button id="refreshNacBtn" class="btn-secondary" onclick="loadNacRejects(true)">Refresh</button>
+                <button id="exportNacRejectsBtn" class="btn-secondary" onclick="exportNacRejectsCsv()">Export CSV</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Device / MAC</th>
+                    <th>Site</th>
+                    <th>Switch &amp; Port</th>
+                    <th>Port Profile</th>
+                    <th>VLAN</th>
+                    <th>Status / Reason</th>
+                    <th>Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody id="nacRejectsBody"><tr><td colspan="7" class="empty">Loading NAC server reject data...</td></tr></tbody>
+              </table>
+            </div>
+            <div class="hist-footer">
+              <span id="nacProfileMeta">Inspecting Mist NAC port profiles, server_reject auth state, Server Reject VLANs &amp; Access Assurance denies.</span>
+              <span id="nacUpdatedMeta">--</span>
+            </div>
           </div>
         </div>
       </main>
@@ -485,10 +560,12 @@
       { id: "tab-history", label: "Wi-Fi History & Peaks", countId: "navHistoryPeak" },
       { id: "tab-sites", label: "All Site Breakdown", countId: "navSitesCount" },
       { id: "tab-ap-issues", label: "APs < 1Gb", countId: "navApIssuesCount" },
+      { id: "tab-nac-rejects", label: "NAC Server Rejects", countId: "navNacRejectsCount" },
       { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
     ];
     let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, countdown = 60, devicesDownTypeFilter = "all";
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
+    let nacState = { duration: "24h", profile: "all", data: null, loading: false };
     let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
     try {
       const savedWb = parseInt(localStorage.getItem("mist_wb_interval") || "", 10);
@@ -558,6 +635,12 @@
           setTimeout(() => renderHistoryChart(histState.data), 30);
         } else {
           loadHistory();
+        }
+      } else if (tabId === "tab-nac-rejects") {
+        if (nacState.data) {
+          renderNacRejectsTable();
+        } else {
+          loadNacRejects(false);
         }
       }
     }
@@ -976,6 +1059,9 @@
       if (!histState.data || (activeTabId === "tab-history" && !histState.anchor)) {
         loadHistory(true);
       }
+      if (!nacState.data || activeTabId === "tab-nac-rejects") {
+        loadNacRejects(false, true);
+      }
     }
 
     function setHistoryRange(range) {
@@ -1297,6 +1383,226 @@
           p.other ?? 0,
           p.selected ?? 0,
           p.samples ?? 0
+        ])
+      );
+    }
+
+    function setNacDuration(dur) {
+      nacState.duration = dur || "24h";
+      document.querySelectorAll("[data-nac-dur]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.nacDur === nacState.duration)
+      );
+      loadNacRejects(false, false);
+    }
+    function setNacProfileFilter(prof) {
+      nacState.profile = prof || "all";
+      renderNacRejectsTable();
+    }
+    function getFilteredNacRejects() {
+      const devices = nacState.data?.devices || [];
+      const q = (document.getElementById("nacRejectsFilter")?.value || "").trim().toLowerCase();
+      return devices.filter(d => {
+        if (nacState.profile !== "all") {
+          const usage = d.port_usage || "";
+          if (usage !== nacState.profile) return false;
+        }
+        if (!q) return true;
+        return (
+          (d.mac || "").toLowerCase().includes(q) ||
+          (d.hostname || "").toLowerCase().includes(q) ||
+          (d.ip || "").toLowerCase().includes(q) ||
+          (d.manufacture || "").toLowerCase().includes(q) ||
+          (d.username || "").toLowerCase().includes(q) ||
+          (d.site_name || "").toLowerCase().includes(q) ||
+          (d.switch_name || "").toLowerCase().includes(q) ||
+          (d.port_id || "").toLowerCase().includes(q) ||
+          (d.port_usage || "").toLowerCase().includes(q) ||
+          (d.vlan_name || "").toLowerCase().includes(q) ||
+          String(d.vlan ?? "").includes(q) ||
+          (d.reason || "").toLowerCase().includes(q) ||
+          (d.reject_type || "").toLowerCase().includes(q)
+        );
+      });
+    }
+    function renderNacRejectsTable() {
+      const tbody = document.getElementById("nacRejectsBody");
+      const badge = document.getElementById("nacRejectsBadge");
+      const exportBtn = document.getElementById("exportNacRejectsBtn");
+      if (!tbody) return;
+      const allDevices = nacState.data?.devices || [];
+      const filtered = getFilteredNacRejects();
+      if (exportBtn) exportBtn.disabled = filtered.length === 0;
+
+      if (badge) {
+        if (allDevices.length === 0) {
+          badge.textContent = "0 Rejected";
+          badge.className = "pill ok";
+        } else {
+          badge.textContent = filtered.length === allDevices.length
+            ? `${fmtNum(allDevices.length)} Rejected`
+            : `${fmtNum(filtered.length)} of ${fmtNum(allDevices.length)} Rejected`;
+          badge.className = "pill bad";
+        }
+      }
+
+      if (!filtered.length) {
+        const msg = allDevices.length === 0
+          ? `No devices with Server Reject found in the last ${escapeHtml(nacState.duration)}.`
+          : "No rejected devices match the current filter.";
+        tbody.innerHTML = `<tr><td colspan="7" class="empty">${msg}</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(d => {
+        const primaryDevice = d.hostname ? `${escapeHtml(d.hostname)}<span class="sub-cell"><code>${escapeHtml(d.mac)}</code></span>` : `<code>${escapeHtml(d.mac)}</code>`;
+        const vendorIp = [d.manufacture, d.ip].filter(Boolean).join(" · ");
+        const deviceCell = vendorIp ? `${primaryDevice}<span class="sub-cell">${escapeHtml(vendorIp)}</span>` : primaryDevice;
+
+        const portSub = d.port_id
+          ? `<span class="sub-cell"><code>${escapeHtml(d.port_id)}</code>${d.port_up === true ? " · up" : (d.port_up === false ? " · down" : "")}</span>`
+          : "";
+        const switchCell = `<strong>${escapeHtml(d.switch_name || "Unknown Switch")}</strong>${portSub}`;
+
+        const profileCell = d.port_usage
+          ? `<span class="pill type-switch">${escapeHtml(d.port_usage)}</span>`
+          : `<span class="meta-text">--</span>`;
+
+        const vlanCell = d.vlan !== null && d.vlan !== undefined
+          ? `<strong>VLAN ${escapeHtml(d.vlan)}</strong>${d.vlan_name ? `<span class="sub-cell">${escapeHtml(d.vlan_name)}</span>` : ""}`
+          : `<span class="meta-text">--</span>`;
+
+        const rType = d.reject_type || "Server Reject";
+        const pillCls = rType === "Server Reject VLAN" ? "warn" : "bad";
+        const detailParts = [d.auth_method, d.username, d.nacrule_name, d.reason].filter(Boolean);
+        const statusCell = `<span class="pill ${pillCls}">${escapeHtml(rType)}</span>${detailParts.length ? `<span class="sub-cell">${escapeHtml(detailParts.join(" · "))}</span>` : ""}`;
+
+        const ls = fmtLastSeen(d.timestamp);
+        const lastSeenCell = ls.rel ? `${escapeHtml(ls.rel)}<span class="sub-cell">${escapeHtml(ls.label)}</span>` : escapeHtml(ls.label);
+
+        return `<tr>
+          <td>${deviceCell}</td>
+          <td>${escapeHtml(d.site_name || "Unknown Site")}</td>
+          <td>${switchCell}</td>
+          <td>${profileCell}</td>
+          <td>${vlanCell}</td>
+          <td>${statusCell}</td>
+          <td>${lastSeenCell}</td>
+        </tr>`;
+      }).join("");
+    }
+    function renderNacRejects(data) {
+      nacState.data = data;
+      const sum = data.summary || {};
+      const total = sum.total_rejected ?? 0;
+
+      document.querySelectorAll("[data-nac-dur]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.nacDur === (data.duration || nacState.duration))
+      );
+
+      document.getElementById("kpiNacTotal").textContent = fmtNum(total);
+      const durLabels = { "1h": "Last 1 hour", "24h": "Last 24 hours", "7d": "Last 7 days" };
+      document.getElementById("kpiNacTotalSub").textContent = durLabels[data.duration] || `Last ${data.duration || "24h"}`;
+      document.getElementById("kpiNacTotalCard").className = `kpi-card ${total > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
+
+      document.getElementById("kpiNacSwitches").textContent = fmtNum(sum.affected_switches ?? 0);
+      document.getElementById("kpiNacSites").textContent = fmtNum(sum.affected_sites ?? 0);
+
+      if (sum.top_profile && sum.top_profile.name) {
+        document.getElementById("kpiNacTopProfile").textContent = sum.top_profile.name;
+        document.getElementById("kpiNacTopProfileSub").textContent = `${fmtNum(sum.top_profile.count)} rejected device${sum.top_profile.count === 1 ? "" : "s"}`;
+      } else {
+        document.getElementById("kpiNacTopProfile").textContent = sum.configured_nac_profiles ? `${fmtNum(sum.configured_nac_profiles)} Configured` : "None";
+        const rv = sum.configured_reject_vlans || [];
+        document.getElementById("kpiNacTopProfileSub").textContent = rv.length
+          ? `Server Reject VLANs: ${rv.map(v => v.vlan_id).join(", ")}`
+          : "No active rejects in window";
+      }
+
+      const navBadge = document.getElementById("navNacRejectsCount");
+      if (navBadge) {
+        navBadge.textContent = fmtNum(total);
+        navBadge.className = `pill ${total > 0 ? "bad" : "ok"}`;
+      }
+
+      const sel = document.getElementById("nacProfileFilter");
+      if (sel) {
+        const profiles = data.port_profiles || [];
+        sel.innerHTML = `<option value="all">All Port Profiles (${profiles.length})</option>` +
+          profiles.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("");
+        if ([...sel.options].some(o => o.value === nacState.profile)) {
+          sel.value = nacState.profile;
+        } else {
+          nacState.profile = "all";
+          sel.value = "all";
+        }
+      }
+
+      const rvList = sum.configured_reject_vlans || [];
+      const metaParts = [`${fmtNum(sum.configured_nac_profiles ?? 0)} NAC port profile(s) detected in switch templates`];
+      if (rvList.length) {
+        metaParts.push(`Server Reject VLANs: ${rvList.map(v => (v.labels || []).join("/")).join(", ")}`);
+      }
+      if (data.warnings && data.warnings.length) {
+        metaParts.push(`Notices: ${data.warnings.join(" | ")}`);
+      }
+      document.getElementById("nacProfileMeta").textContent = metaParts.join(" · ");
+      const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "just now";
+      document.getElementById("nacUpdatedMeta").textContent = `Updated ${fetched}`;
+
+      renderNacRejectsTable();
+      renderWallboardTabs();
+    }
+    async function loadNacRejects(force = false, silent = false) {
+      if (nacState.loading && !force) return;
+      nacState.loading = true;
+      const btn = document.getElementById("refreshNacBtn");
+      if (btn) btn.disabled = true;
+      const qs = new URLSearchParams({ duration: nacState.duration });
+      if (force) qs.set("refresh", "1");
+      try {
+        const res = await fetch(`/api/nac-rejects?${qs.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || data.login_required) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        renderNacRejects(data);
+      } catch (err) {
+        if (!silent) {
+          const banner = document.getElementById("errorBanner");
+          banner.textContent = "Error loading NAC server rejects: " + err.message;
+          banner.style.display = "block";
+        }
+      } finally {
+        nacState.loading = false;
+        if (btn) btn.disabled = false;
+      }
+    }
+    function exportNacRejectsCsv() {
+      const rows = getFilteredNacRejects();
+      if (!rows.length) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(
+        `mist-nac-server-rejects-${nacState.duration}-${dateStamp}.csv`,
+        ["MAC", "Hostname", "Vendor", "IP", "Username", "Site", "Switch", "Port", "Port Profile", "VLAN", "VLAN Name", "Status", "Auth Method", "NAC Rule", "Reason", "Last Seen"],
+        rows.map(d => [
+          d.mac ?? "",
+          d.hostname ?? "",
+          d.manufacture ?? "",
+          d.ip ?? "",
+          d.username ?? "",
+          d.site_name ?? "",
+          d.switch_name ?? "",
+          d.port_id ?? "",
+          d.port_usage ?? "",
+          d.vlan ?? "",
+          d.vlan_name ?? "",
+          d.reject_type ?? "",
+          d.auth_method ?? "",
+          d.nacrule_name ?? "",
+          d.reason ?? "",
+          typeof d.timestamp === "number" && d.timestamp > 0 ? new Date(d.timestamp * 1000).toISOString() : ""
         ])
       );
     }

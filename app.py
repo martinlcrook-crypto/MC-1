@@ -11,6 +11,7 @@ from flask import Flask, jsonify, redirect, request, send_from_directory, sessio
 import requests
 
 from history_store import init_history_db, query_history, record_snapshot
+from nac_rejects import collect_nac_server_rejects
 
 
 def load_dotenv(path: Path) -> None:
@@ -1123,6 +1124,74 @@ def api_history():
         return jsonify({"error": f"Failed to load Wi-Fi history: {exc}"}), 500
 
     resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+_nac_cache_lock = threading.Lock()
+_nac_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+@app.get("/api/nac-rejects")
+def api_nac_rejects():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    raw_duration = (request.args.get("duration") or "24h").strip().lower()
+    duration = raw_duration if raw_duration in ("1h", "24h", "7d") else "24h"
+    force_refresh = request.args.get("refresh") == "1"
+    now = time.time()
+
+    with _nac_cache_lock:
+        cached_entry = _nac_cache.get(duration)
+        if cached_entry is not None:
+            cached_ts, cached_payload = cached_entry
+            age = now - cached_ts
+            if (not force_refresh and age < CACHE_TTL_SECONDS) or (
+                force_refresh and age < MIN_REFRESH_INTERVAL
+            ):
+                out = dict(cached_payload)
+                out["cached"] = True
+                out["cache_age_seconds"] = int(age)
+                resp = jsonify(out)
+                resp.headers["Cache-Control"] = "no-store"
+                return resp
+
+    site_name_map: Dict[str, str] = {}
+    with _cache_lock:
+        if isinstance(_cache_data, dict):
+            for s in _cache_data.get("sites") or []:
+                if isinstance(s, dict) and s.get("id"):
+                    site_name_map[str(s["id"])] = str(s.get("name") or s["id"])
+
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Token {MIST_API_TOKEN}", "Accept": "application/json"})
+    try:
+        fresh = collect_nac_server_rejects(
+            session=session,
+            api_host=MIST_API_HOST,
+            org_id=MIST_ORG_ID,
+            duration=duration,
+            site_name_map=site_name_map or None,
+        )
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
+    except Exception as exc:
+        return jsonify({"error": f"Failed to query Mist NAC server rejects: {exc}"}), 502
+    finally:
+        session.close()
+
+    fresh["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    with _nac_cache_lock:
+        _nac_cache[duration] = (time.time(), fresh)
+
+    out = dict(fresh)
+    out["cached"] = False
+    out["cache_age_seconds"] = 0
+    resp = jsonify(out)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

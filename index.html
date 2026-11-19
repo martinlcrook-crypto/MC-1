@@ -72,6 +72,14 @@
     .pill.warn { background: rgba(251, 191, 36, 0.15); color: var(--amber); }
     .pill.bad { background: rgba(248, 113, 113, 0.15); color: var(--red); }
     .pill.neutral { background: var(--panel-alt); color: var(--muted); border: 1px solid var(--border); }
+    .pill.type-ap { background: rgba(56, 189, 248, 0.15); color: var(--accent); }
+    .pill.type-switch { background: rgba(129, 140, 248, 0.18); color: var(--eduroam); }
+    .kpi-down-bad .kpi-value { color: var(--red); }
+    .kpi-down-ok .kpi-value { color: var(--green); }
+    .filter-group { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+    .filter-btn { background: var(--bg); color: var(--muted); border: 1px solid var(--border); border-radius: 8px; padding: 6px 11px; font-size: 0.8rem; font-weight: 600; cursor: pointer; }
+    .filter-btn:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
+    .filter-btn.active { background: rgba(56, 189, 248, 0.16); color: var(--accent); border-color: rgba(56, 189, 248, 0.5); }
     .alarm-list { display: flex; flex-direction: column; gap: 10px; max-height: 520px; overflow-y: auto; }
     .alarm-item { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 0.85rem; }
     .alarm-top { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
@@ -124,12 +132,16 @@
           <span>Homescreen</span>
           <span id="navUsersCount" class="pill neutral">--</span>
         </button>
+        <button class="nav-tab" data-tab="tab-devices-down" onclick="switchTab('tab-devices-down')">
+          <span>Devices Down</span>
+          <span id="navDevicesDownCount" class="pill ok">0</span>
+        </button>
         <button class="nav-tab" data-tab="tab-sites" onclick="switchTab('tab-sites')">
           <span>All Site Breakdown</span>
           <span id="navSitesCount" class="pill neutral">--</span>
         </button>
         <button class="nav-tab" data-tab="tab-ap-issues" onclick="switchTab('tab-ap-issues')">
-          <span>APs &lt; 1Gb &amp; Offline</span>
+          <span>APs &lt; 1Gb</span>
           <span id="navApIssuesCount" class="pill ok">0</span>
         </button>
         <button class="nav-tab" data-tab="tab-alarms" onclick="switchTab('tab-alarms')">
@@ -191,7 +203,61 @@
           </div>
         </div>
 
-        <!-- TAB 2: ALL SITE BREAKDOWN -->
+        <!-- TAB 2: DEVICES DOWN (APs & SWITCHES) -->
+        <div id="tab-devices-down" class="tab-pane">
+          <section class="kpi-grid">
+            <div class="kpi-card kpi-down-ok" id="kpiDownTotalCard">
+              <div class="kpi-label">Total Devices Down</div>
+              <div class="kpi-value" id="kpiDownTotal">--</div>
+              <div class="kpi-sub" id="kpiDownTotalSub">APs &amp; Switches offline</div>
+            </div>
+            <div class="kpi-card kpi-down-ok" id="kpiDownApsCard">
+              <div class="kpi-label">Access Points Down</div>
+              <div class="kpi-value" id="kpiDownAps">--</div>
+              <div class="kpi-sub" id="kpiDownApsSub">-- / -- online</div>
+            </div>
+            <div class="kpi-card kpi-down-ok" id="kpiDownSwitchesCard">
+              <div class="kpi-label">Switches Down</div>
+              <div class="kpi-value" id="kpiDownSwitches">--</div>
+              <div class="kpi-sub" id="kpiDownSwitchesSub">-- / -- online</div>
+            </div>
+          </section>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title">Offline Access Points &amp; Switches</h2>
+                <span id="devicesDownBadge" class="pill ok">All Online</span>
+              </div>
+              <div class="panel-actions">
+                <div class="filter-group">
+                  <button class="filter-btn active" data-down-type="all" onclick="setDeviceDownFilter('all')">All (<span id="downFilterAllCount">0</span>)</button>
+                  <button class="filter-btn" data-down-type="AP" onclick="setDeviceDownFilter('AP')">APs (<span id="downFilterApCount">0</span>)</button>
+                  <button class="filter-btn" data-down-type="Switch" onclick="setDeviceDownFilter('Switch')">Switches (<span id="downFilterSwitchCount">0</span>)</button>
+                </div>
+                <input id="devicesDownFilter" class="search" type="search" placeholder="Filter device, site, model, MAC..." oninput="renderDevicesDownTable()" />
+                <button id="exportDevicesDownBtn" class="btn-secondary" onclick="exportDevicesDownCsv()">Export CSV</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Device Name</th>
+                    <th>Site</th>
+                    <th>Model</th>
+                    <th>Status</th>
+                    <th>Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody id="devicesDownBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 3: ALL SITE BREAKDOWN -->
         <div id="tab-sites" class="tab-pane">
           <div class="panel">
             <div class="panel-header">
@@ -221,7 +287,7 @@
           </div>
         </div>
 
-        <!-- TAB 3: APs < 1GB & OFFLINE -->
+        <!-- TAB 4: APs < 1GB -->
         <div id="tab-ap-issues" class="tab-pane">
           <div class="panel">
             <div class="panel-header">
@@ -251,19 +317,9 @@
               </table>
             </div>
           </div>
-
-          <div class="panel">
-            <div class="panel-header">
-              <div class="panel-actions">
-                <h2 class="panel-title">Offline Access Points</h2>
-                <span id="offlineApsBadge" class="pill ok">0 Offline</span>
-              </div>
-            </div>
-            <div id="offlineApsList" class="alarm-list"></div>
-          </div>
         </div>
 
-        <!-- TAB 4: RECENT ALARMS -->
+        <!-- TAB 5: RECENT ALARMS -->
         <div id="tab-alarms" class="tab-pane">
           <div class="panel">
             <div class="panel-header">
@@ -279,15 +335,61 @@
     </div>
   </div>
   <script>
-    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, countdown = 60;
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, countdown = 60, devicesDownTypeFilter = "all";
     function fmtNum(n) { return typeof n === "number" ? n.toLocaleString() : "--"; }
     function escapeHtml(str) { return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+    function fmtLastSeen(ts) {
+      if (typeof ts !== "number" || ts <= 0) return { label: "--", rel: "" };
+      const d = new Date(ts * 1000);
+      const diffSec = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      let rel = "";
+      if (diffSec < 60) rel = `${diffSec}s ago`;
+      else if (diffSec < 3600) rel = `${Math.floor(diffSec / 60)}m ago`;
+      else if (diffSec < 86400) {
+        const hrs = Math.floor(diffSec / 3600);
+        const mins = Math.floor((diffSec % 3600) / 60);
+        rel = mins > 0 ? `${hrs}h ${mins}m ago` : `${hrs}h ago`;
+      } else {
+        const days = Math.floor(diffSec / 86400);
+        const hrs = Math.floor((diffSec % 86400) / 3600);
+        rel = hrs > 0 ? `${days}d ${hrs}h ago` : `${days}d ago`;
+      }
+      return { label: d.toLocaleString(), rel };
+    }
     function switchTab(tabId) {
       document.querySelectorAll(".tab-pane").forEach(el => el.classList.toggle("active", el.id === tabId));
       document.querySelectorAll(".nav-tab").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === tabId));
       if (tabId === "tab-home" && latestData) {
         setTimeout(() => renderCharts(latestData), 30);
       }
+    }
+    function setDeviceDownFilter(type) {
+      devicesDownTypeFilter = type;
+      document.querySelectorAll("[data-down-type]").forEach(btn => btn.classList.toggle("active", btn.dataset.downType === type));
+      renderDevicesDownTable();
+    }
+    function getAllDevicesDown() {
+      if (!latestData) return [];
+      if (Array.isArray(latestData.devices_down)) return latestData.devices_down;
+      const switches = (latestData.offline_switches || []).map(d => ({ ...d, device_type: d.device_type || "Switch" }));
+      const aps = (latestData.offline_aps || []).map(d => ({ ...d, device_type: d.device_type || "AP" }));
+      return [...switches, ...aps];
+    }
+    function getFilteredDevicesDown() {
+      const q = (document.getElementById("devicesDownFilter")?.value || "").trim().toLowerCase();
+      return getAllDevicesDown().filter(d => {
+        const dtype = d.device_type || "AP";
+        if (devicesDownTypeFilter !== "all" && dtype !== devicesDownTypeFilter) return false;
+        if (!q) return true;
+        return (
+          (d.name || "").toLowerCase().includes(q) ||
+          (d.site_name || "").toLowerCase().includes(q) ||
+          (d.model || "").toLowerCase().includes(q) ||
+          (d.mac || "").toLowerCase().includes(q) ||
+          (d.ip || "").toLowerCase().includes(q) ||
+          dtype.toLowerCase().includes(q)
+        );
+      });
     }
     function getFilteredSites() {
       if (!latestData) return [];
@@ -332,6 +434,26 @@
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
     }
+    function exportDevicesDownCsv() {
+      const rows = getFilteredDevicesDown();
+      if (!rows.length) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(
+        `mist-devices-down-${dateStamp}.csv`,
+        ["Type", "Device Name", "Site", "Model", "Firmware", "IP", "MAC", "Status", "Last Seen"],
+        rows.map(d => [
+          d.device_type ?? "AP",
+          d.name ?? "",
+          d.site_name ?? "",
+          d.model ?? "",
+          d.version ?? "",
+          d.ip ?? "",
+          d.mac ?? "",
+          d.status ?? "disconnected",
+          typeof d.last_seen === "number" && d.last_seen > 0 ? new Date(d.last_seen * 1000).toISOString() : ""
+        ])
+      );
+    }
     function exportSitesCsv() {
       const rows = getFilteredSites();
       if (!rows.length) return;
@@ -375,6 +497,47 @@
           ap.num_clients ?? 0
         ])
       );
+    }
+    function renderDevicesDownTable() {
+      const tbody = document.getElementById("devicesDownBody");
+      const badge = document.getElementById("devicesDownBadge");
+      if (!latestData) return;
+      const allDown = getAllDevicesDown();
+      const totalDown = allDown.length;
+      const downAps = (latestData.offline_aps || []).length;
+      const downSwitches = (latestData.offline_switches || []).length;
+
+      document.getElementById("downFilterAllCount").textContent = fmtNum(totalDown);
+      document.getElementById("downFilterApCount").textContent = fmtNum(downAps);
+      document.getElementById("downFilterSwitchCount").textContent = fmtNum(downSwitches);
+
+      badge.textContent = totalDown === 0 ? "All Online" : `${fmtNum(totalDown)} Device${totalDown === 1 ? "" : "s"} Down`;
+      badge.className = `pill ${totalDown === 0 ? "ok" : "bad"}`;
+
+      const rows = getFilteredDevicesDown();
+      if (!totalDown) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty" style="color:var(--green);">All Access Points and Switches are currently online.</td></tr>';
+        return;
+      }
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No matching offline devices found.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(d => {
+        const dtype = d.device_type || "AP";
+        const typeCls = dtype === "Switch" ? "type-switch" : "type-ap";
+        const devMeta = [d.ip, d.mac].filter(Boolean).join(" · ");
+        const verMeta = d.version ? `<span class="sub-cell">${escapeHtml(d.version)}</span>` : "";
+        const seen = fmtLastSeen(d.last_seen);
+        return `<tr>
+          <td><span class="pill ${typeCls}">${escapeHtml(dtype)}</span></td>
+          <td><strong>${escapeHtml(d.name)}</strong>${devMeta ? `<span class="sub-cell">${escapeHtml(devMeta)}</span>` : ""}</td>
+          <td>${escapeHtml(d.site_name)}</td>
+          <td>${escapeHtml(d.model || "--")}${verMeta}</td>
+          <td><span class="pill bad">${escapeHtml(d.status || "disconnected")}</span></td>
+          <td>${escapeHtml(seen.label)}${seen.rel ? `<span class="sub-cell">${escapeHtml(seen.rel)}</span>` : ""}</td>
+        </tr>`;
+      }).join("");
     }
     function renderSitesTable() {
       const tbody = document.getElementById("sitesBody");
@@ -478,23 +641,42 @@
       document.getElementById("kpiApsSub").textContent = apSubParts.join(" · ");
       document.getElementById("kpiRssi").textContent = sum.avg_rssi !== null && sum.avg_rssi !== undefined ? `${sum.avg_rssi} dBm` : "--";
 
+      // Devices Down KPIs
+      const downAps = (data.offline_aps || []).length;
+      const downSwitches = (data.offline_switches || []).length;
+      const totalDown = downAps + downSwitches;
+      document.getElementById("kpiDownTotal").textContent = fmtNum(totalDown);
+      document.getElementById("kpiDownTotalSub").textContent = totalDown === 0 ? "All APs & Switches online" : `${fmtNum(downAps)} AP${downAps === 1 ? "" : "s"} · ${fmtNum(downSwitches)} Switch${downSwitches === 1 ? "" : "es"}`;
+      document.getElementById("kpiDownTotalCard").className = `kpi-card ${totalDown > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
+
+      document.getElementById("kpiDownAps").textContent = fmtNum(downAps);
+      document.getElementById("kpiDownApsSub").textContent = `${fmtNum(sum.aps_online ?? 0)} / ${fmtNum(sum.aps_total ?? 0)} APs online`;
+      document.getElementById("kpiDownApsCard").className = `kpi-card ${downAps > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
+
+      document.getElementById("kpiDownSwitches").textContent = fmtNum(downSwitches);
+      document.getElementById("kpiDownSwitchesSub").textContent = `${fmtNum(sum.switches_online ?? 0)} / ${fmtNum(sum.switches_total ?? 0)} switches online`;
+      document.getElementById("kpiDownSwitchesCard").className = `kpi-card ${downSwitches > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
+
       // Update Sidebar Badges
       document.getElementById("navUsersCount").textContent = fmtNum(sum.total_wireless_users);
+
+      const navDownBadge = document.getElementById("navDevicesDownCount");
+      navDownBadge.textContent = fmtNum(totalDown);
+      navDownBadge.className = `pill ${totalDown > 0 ? "bad" : "ok"}`;
+
       document.getElementById("navSitesCount").textContent = fmtNum(sum.total_sites);
 
       const slowCount = (data.slow_aps || []).length;
-      const offlineCount = (data.offline_aps || []).length;
-      const totalApIssues = slowCount + offlineCount;
       const navApBadge = document.getElementById("navApIssuesCount");
-      navApBadge.textContent = fmtNum(totalApIssues);
-      navApBadge.className = `pill ${offlineCount > 0 ? "bad" : (slowCount > 0 ? "warn" : "ok")}`;
+      navApBadge.textContent = fmtNum(slowCount);
+      navApBadge.className = `pill ${slowCount > 0 ? "warn" : "ok"}`;
 
       const alarms = data.alarms || [];
       const navAlarmsBadge = document.getElementById("navAlarmsCount");
       navAlarmsBadge.textContent = fmtNum(alarms.length);
       navAlarmsBadge.className = `pill ${alarms.length > 0 ? "warn" : "ok"}`;
 
-      renderSitesTable(); renderSlowApsTable(); renderCharts(data);
+      renderDevicesDownTable(); renderSitesTable(); renderSlowApsTable(); renderCharts(data);
 
       const topAps = data.top_aps || [];
       document.getElementById("apsBody").innerHTML = topAps.length ? topAps.map(ap => `<tr><td>${escapeHtml(ap.name)}</td><td>${escapeHtml(ap.site_name)}</td><td class="num"><strong>${fmtNum(ap.num_clients)}</strong></td><td><span class="pill ${ap.status === "connected" ? "ok" : "bad"}">${escapeHtml(ap.status)}</span></td></tr>`).join("") : '<tr><td colspan="4" class="empty">No APs found.</td></tr>';
@@ -503,12 +685,6 @@
       alarmsBadge.textContent = `${fmtNum(alarms.length)} Alarm${alarms.length === 1 ? "" : "s"}`;
       alarmsBadge.className = `pill ${alarms.length > 0 ? "warn" : "ok"}`;
       document.getElementById("alarmsList").innerHTML = alarms.length ? alarms.map(a => { const sev = (a.severity || "").toLowerCase(); const cls = sev === "critical" ? "bad" : (sev === "warn" || sev === "warning" ? "warn" : "ok"); const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleString() : ""; return `<div class="alarm-item"><div class="alarm-top"><strong>${escapeHtml(a.site_name)} — ${escapeHtml(a.type)}</strong><span class="pill ${cls}">${escapeHtml(a.severity)}</span></div><div class="meta-text">${escapeHtml(a.text)} ${ts ? "· " + escapeHtml(ts) : ""}</div></div>`; }).join("") : '<div class="empty">No alarms in the last 24 hours.</div>';
-
-      const offline = data.offline_aps || [];
-      const offlineBadge = document.getElementById("offlineApsBadge");
-      offlineBadge.textContent = offline.length === 0 ? "All Online" : `${fmtNum(offline.length)} Offline`;
-      offlineBadge.className = `pill ${offline.length === 0 ? "ok" : "bad"}`;
-      document.getElementById("offlineApsList").innerHTML = offline.length ? offline.map(ap => `<div class="alarm-item"><div class="alarm-top"><strong>${escapeHtml(ap.name)}</strong><span class="pill bad">${escapeHtml(ap.status)}</span></div><div class="meta-text">${escapeHtml(ap.site_name)} · ${escapeHtml(ap.model)} · ${escapeHtml(ap.mac)}</div></div>`).join("") : '<div class="empty" style="color:var(--green);">All access points are currently online.</div>';
 
       const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "just now";
       document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`;

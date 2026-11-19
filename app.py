@@ -389,6 +389,43 @@ def collect_mist_snapshot() -> Dict[str, Any]:
 
     site_clients = deduplicate_org_clients(site_map, site_clients)
 
+    switches_online = 0
+    switches_offline = 0
+    offline_switches: List[Dict[str, Any]] = []
+    try:
+        raw_switches = mist_get_paginated(
+            session,
+            f"/api/v1/orgs/{MIST_ORG_ID}/stats/devices",
+            params={"type": "switch", "status": "all"},
+            limit=1000,
+            send_page_params=True,
+            dedup_keys=("mac", "id"),
+        )
+        for sw in raw_switches:
+            status = str(sw.get("status") or "").lower()
+            if status == "connected":
+                switches_online += 1
+                continue
+            switches_offline += 1
+            sid = sw.get("site_id", "")
+            ip_stat = sw.get("ip_stat") if isinstance(sw.get("ip_stat"), dict) else {}
+            sw_ip = str(sw.get("ip") or ip_stat.get("ip") or "").strip()
+            offline_switches.append(
+                {
+                    "device_type": "Switch",
+                    "name": sw.get("name") or sw.get("mac", "Unnamed Switch"),
+                    "site_name": sw.get("site_name") or site_map.get(sid, {}).get("name", "Unassigned"),
+                    "model": sw.get("model", ""),
+                    "mac": sw.get("mac", ""),
+                    "ip": sw_ip,
+                    "version": sw.get("version", ""),
+                    "last_seen": sw.get("last_seen"),
+                    "status": status or "disconnected",
+                }
+            )
+    except Exception as exc:
+        warnings.append(f"Switch stats unavailable: {exc}")
+
     alarms: List[Dict[str, Any]] = []
     try:
         alarms_resp = mist_get(
@@ -502,10 +539,14 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 site_aps_off += 1
                 offline_aps.append(
                     {
+                        "device_type": "AP",
                         "name": ap_name,
                         "site_name": site_name,
                         "model": ap_model,
                         "mac": ap_mac,
+                        "ip": ap_ip,
+                        "version": ap.get("version", ""),
+                        "last_seen": ap.get("last_seen"),
                         "status": status or "disconnected",
                     }
                 )
@@ -542,6 +583,9 @@ def collect_mist_snapshot() -> Dict[str, Any]:
     sites_summary.sort(key=lambda s: (-s["total_users"], s["name"].lower()))
     all_aps_list.sort(key=lambda a: (-a["num_clients"], a["name"].lower()))
     slow_aps.sort(key=lambda a: (a["speed"], a["site_name"].lower(), a["name"].lower()))
+    offline_aps.sort(key=lambda d: (d["site_name"].lower(), d["name"].lower()))
+    offline_switches.sort(key=lambda d: (d["site_name"].lower(), d["name"].lower()))
+    devices_down = offline_switches + offline_aps
 
     ssids_sorted = sorted(
         [{"name": k, "count": v} for k, v in ssid_counts.items()],
@@ -582,6 +626,10 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             "aps_online": aps_online,
             "aps_offline": aps_offline,
             "aps_total": aps_online + aps_offline,
+            "switches_online": switches_online,
+            "switches_offline": switches_offline,
+            "switches_total": switches_online + switches_offline,
+            "devices_down_total": len(devices_down),
             "slow_aps_count": len(slow_aps),
             "avg_rssi": round(sum(rssi_values) / len(rssi_values), 1) if rssi_values else None,
         },
@@ -591,6 +639,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         "protocols": protos_sorted,
         "top_aps": all_aps_list[:10],
         "offline_aps": offline_aps,
+        "offline_switches": offline_switches,
+        "devices_down": devices_down,
         "slow_aps": slow_aps,
         "alarms": alarms,
         "warnings": warnings,

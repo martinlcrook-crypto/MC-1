@@ -6,3 +6,6 @@ __pycache__/
 app.pid
 .flask_secret
 .certbot-venv/
+history.db
+history.db-wal
+history.db-shm

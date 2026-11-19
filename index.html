@@ -131,6 +131,22 @@
     body.wallboard-mode th,
     body.wallboard-mode td { padding: 12px 14px; }
     body.wallboard-mode .alarm-item { font-size: 1rem; padding: 14px 16px; }
+
+    /* Wi-Fi History & Peaks Tab */
+    .chart-wrap-lg { position: relative; height: 370px; }
+    body.wallboard-mode .chart-wrap-lg { height: 430px; }
+    .hist-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .hist-nav { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .hist-period-label { font-weight: 700; font-size: 0.95rem; min-width: 150px; text-align: center; color: var(--text); }
+    .hist-subbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 12px; min-height: 26px; }
+    .hist-breadcrumbs { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82rem; color: var(--muted); }
+    .hist-crumb { background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 0.78rem; font-weight: 600; cursor: pointer; }
+    .hist-crumb:hover { border-color: var(--accent); opacity: 1; }
+    .hist-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
+    .hist-empty { display: none; text-align: center; padding: 64px 20px; color: var(--muted); font-size: 0.92rem; }
+    body.wallboard-mode .hist-controls,
+    body.wallboard-mode #exportHistoryBtn { display: none !important; }
+    body.wallboard-mode #tab-history .kpi-grid { grid-template-columns: repeat(4, 1fr); }
   </style>
 </head>
 <body>
@@ -180,6 +196,10 @@
         <button class="nav-tab" data-tab="tab-devices-down" onclick="switchTab('tab-devices-down')">
           <span>Devices Down</span>
           <span id="navDevicesDownCount" class="pill ok">0</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-history" onclick="switchTab('tab-history')">
+          <span>Wi-Fi History &amp; Peaks</span>
+          <span id="navHistoryPeak" class="pill neutral">--</span>
         </button>
         <button class="nav-tab" data-tab="tab-sites" onclick="switchTab('tab-sites')">
           <span>All Site Breakdown</span>
@@ -302,7 +322,86 @@
           </div>
         </div>
 
-        <!-- TAB 3: ALL SITE BREAKDOWN -->
+        <!-- TAB 3: WI-FI HISTORY & CONCURRENT PEAKS -->
+        <div id="tab-history" class="tab-pane">
+          <section class="kpi-grid">
+            <div class="kpi-card kpi-wireless">
+              <div class="kpi-label" id="kpiHistPeakLabel">Period Peak (Total Wi-Fi)</div>
+              <div class="kpi-value" id="kpiHistPeakVal">--</div>
+              <div class="kpi-sub" id="kpiHistPeakSub">Waiting for samples...</div>
+            </div>
+            <div class="kpi-card kpi-eduroam">
+              <div class="kpi-label">eduroam Period Peak</div>
+              <div class="kpi-value" id="kpiHistEduroam">--</div>
+              <div class="kpi-sub" id="kpiHistEduroamSub">--</div>
+            </div>
+            <div class="kpi-card kpi-visitor">
+              <div class="kpi-label">UoP Visitor Period Peak</div>
+              <div class="kpi-value" id="kpiHistVisitor">--</div>
+              <div class="kpi-sub" id="kpiHistVisitorSub">--</div>
+            </div>
+            <div class="kpi-card kpi-connect">
+              <div class="kpi-label">UoP Connect Period Peak</div>
+              <div class="kpi-value" id="kpiHistConnect">--</div>
+              <div class="kpi-sub" id="kpiHistConnectSub">--</div>
+            </div>
+          </section>
+
+          <div class="panel">
+            <div class="hist-toolbar">
+              <div class="panel-actions">
+                <h2 class="panel-title" id="histChartTitle">Concurrent Wi-Fi User Peaks</h2>
+                <span id="histGranularityBadge" class="pill neutral">15-minute peaks</span>
+              </div>
+              <div class="panel-actions hist-controls">
+                <div class="filter-group">
+                  <button class="filter-btn active" data-hist-range="day" onclick="setHistoryRange('day')">Day</button>
+                  <button class="filter-btn" data-hist-range="week" onclick="setHistoryRange('week')">Week</button>
+                  <button class="filter-btn" data-hist-range="month" onclick="setHistoryRange('month')">Month</button>
+                  <button class="filter-btn" data-hist-range="year" onclick="setHistoryRange('year')">Year</button>
+                  <button class="filter-btn" data-hist-range="all" onclick="setHistoryRange('all')">All Time</button>
+                </div>
+                <select id="histSsidSelect" class="wb-select" title="Filter or break down by SSID" onchange="setHistorySsid(this.value)">
+                  <option value="all">All Wi-Fi + SSID Breakdown</option>
+                  <option value="total">Total Wi-Fi Only</option>
+                  <option value="eduroam">eduroam</option>
+                  <option value="uop_visitor">UoP Visitor</option>
+                  <option value="uop_connect">UoP Connect</option>
+                  <option value="other">Other SSIDs</option>
+                  <optgroup id="histIndividualSsids" label="Individual SSIDs"></optgroup>
+                </select>
+                <div class="filter-group">
+                  <button class="filter-btn active" data-hist-chart="auto" onclick="setHistoryChartMode('auto')">Auto</button>
+                  <button class="filter-btn" data-hist-chart="line" onclick="setHistoryChartMode('line')">Line</button>
+                  <button class="filter-btn" data-hist-chart="bar" onclick="setHistoryChartMode('bar')">Bar</button>
+                </div>
+                <button id="exportHistoryBtn" class="btn-secondary" onclick="exportHistoryCsv()">Export CSV</button>
+              </div>
+            </div>
+
+            <div class="hist-subbar">
+              <div id="histBreadcrumbs" class="hist-breadcrumbs"></div>
+              <div class="hist-nav hist-controls">
+                <button id="histPrevBtn" class="filter-btn" onclick="stepHistoryPeriod('prev')">&lsaquo; Prev</button>
+                <span id="histPeriodLabel" class="hist-period-label">Last 24 Hours</span>
+                <button id="histNextBtn" class="filter-btn" onclick="stepHistoryPeriod('next')">Next &rsaquo;</button>
+                <button id="histLatestBtn" class="filter-btn" onclick="resetHistoryToLatest()">Latest</button>
+              </div>
+            </div>
+
+            <div id="histEmptyMsg" class="hist-empty">No Wi-Fi history samples recorded for this period yet. Snapshots are recorded automatically every 5 minutes (1 minute while viewing).</div>
+            <div id="histChartWrap" class="chart-wrap-lg">
+              <canvas id="historyChart"></canvas>
+            </div>
+
+            <div class="hist-footer">
+              <span id="histDrillHint">Select Week, Month, Year, or All Time and click any point to drill down.</span>
+              <span id="histCoverageMeta">Loading history metadata...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 4: ALL SITE BREAKDOWN -->
         <div id="tab-sites" class="tab-pane">
           <div class="panel">
             <div class="panel-header">
@@ -383,11 +482,13 @@
     const WALLBOARD_TABS = [
       { id: "tab-home", label: "Homescreen", countId: "navUsersCount" },
       { id: "tab-devices-down", label: "Devices Down", countId: "navDevicesDownCount" },
+      { id: "tab-history", label: "Wi-Fi History & Peaks", countId: "navHistoryPeak" },
       { id: "tab-sites", label: "All Site Breakdown", countId: "navSitesCount" },
       { id: "tab-ap-issues", label: "APs < 1Gb", countId: "navApIssuesCount" },
       { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
     ];
-    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, countdown = 60, devicesDownTypeFilter = "all";
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, countdown = 60, devicesDownTypeFilter = "all";
+    let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
     let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
     try {
       const savedWb = parseInt(localStorage.getItem("mist_wb_interval") || "", 10);
@@ -452,6 +553,12 @@
       if (wbActive) updateWallboardProgress();
       if (tabId === "tab-home" && latestData) {
         setTimeout(() => renderCharts(latestData), 30);
+      } else if (tabId === "tab-history") {
+        if (histState.data) {
+          setTimeout(() => renderHistoryChart(histState.data), 30);
+        } else {
+          loadHistory();
+        }
       }
     }
     function jumpWallboardTab(tabId) {
@@ -866,7 +973,334 @@
       renderWallboardTabs();
       const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "just now";
       document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`;
+      if (!histState.data || (activeTabId === "tab-history" && !histState.anchor)) {
+        loadHistory(true);
+      }
     }
+
+    function setHistoryRange(range) {
+      histState.range = range;
+      histState.anchor = null;
+      histState.drillStack = [];
+      loadHistory();
+    }
+    function setHistorySsid(ssidVal) {
+      histState.ssid = ssidVal || "all";
+      loadHistory();
+    }
+    function setHistoryChartMode(mode) {
+      histState.chartMode = mode || "auto";
+      document.querySelectorAll("[data-hist-chart]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.histChart === histState.chartMode)
+      );
+      if (histState.data) renderHistoryChart(histState.data);
+    }
+    function stepHistoryPeriod(dir) {
+      const d = histState.data;
+      if (!d) return;
+      const target = dir === "prev" ? d.prev_anchor : d.next_anchor;
+      if (!target) return;
+      histState.anchor = target;
+      histState.drillStack = [];
+      loadHistory();
+    }
+    function resetHistoryToLatest() {
+      histState.anchor = null;
+      histState.drillStack = [];
+      loadHistory();
+    }
+    function drillIntoHistory(target) {
+      if (!target || !target.range) return;
+      histState.drillStack.push({
+        range: histState.range,
+        anchor: histState.anchor,
+        label: histState.data?.period_label || histState.range
+      });
+      histState.range = target.range;
+      histState.anchor = target.anchor || null;
+      loadHistory();
+    }
+    function popHistoryDrill(idx) {
+      if (idx < 0 || idx >= histState.drillStack.length) return;
+      const dest = histState.drillStack[idx];
+      histState.drillStack = histState.drillStack.slice(0, idx);
+      histState.range = dest.range;
+      histState.anchor = dest.anchor;
+      loadHistory();
+    }
+    function renderHistoryBreadcrumbs(data) {
+      const wrap = document.getElementById("histBreadcrumbs");
+      if (!wrap) return;
+      if (!histState.drillStack.length) {
+        wrap.innerHTML = `<span>Viewing: <strong style="color:var(--text)">${escapeHtml(data.period_label || "")}</strong></span>`;
+        return;
+      }
+      const crumbs = histState.drillStack.map((item, i) =>
+        `<button type="button" class="hist-crumb" onclick="popHistoryDrill(${i})">${escapeHtml(item.label)}</button><span>&rsaquo;</span>`
+      ).join("");
+      const backIdx = histState.drillStack.length - 1;
+      wrap.innerHTML = `<button type="button" class="hist-crumb" onclick="popHistoryDrill(${backIdx})">&uarr; Zoom Out</button>${crumbs}<strong style="color:var(--text)">${escapeHtml(data.period_label || "")}</strong>`;
+    }
+    function populateHistorySsidOptions(availableSsids) {
+      const group = document.getElementById("histIndividualSsids");
+      const sel = document.getElementById("histSsidSelect");
+      if (!group || !sel) return;
+      const builtIn = new Set(["eduroam", "uop visitor", "uop connect"]);
+      const extras = (availableSsids || []).filter(name => !builtIn.has(String(name).toLowerCase()));
+      group.innerHTML = extras.map(name =>
+        `<option value="${escapeHtml("ssid:" + name)}">${escapeHtml(name)}</option>`
+      ).join("");
+      group.style.display = extras.length ? "" : "none";
+      if ([...sel.options].some(o => o.value === histState.ssid)) {
+        sel.value = histState.ssid;
+      } else {
+        histState.ssid = "all";
+        sel.value = "all";
+      }
+    }
+    function renderHistoryChart(data) {
+      const points = data.points || [];
+      const emptyEl = document.getElementById("histEmptyMsg");
+      const wrapEl = document.getElementById("histChartWrap");
+      if (!points.length) {
+        if (historyChart) { historyChart.destroy(); historyChart = null; }
+        emptyEl.style.display = "block";
+        wrapEl.style.display = "none";
+        return;
+      }
+      emptyEl.style.display = "none";
+      wrapEl.style.display = "block";
+
+      const isBreakdown = data.ssid === "all";
+      let chartType = histState.chartMode;
+      if (chartType === "auto") {
+        chartType = (!isBreakdown && (data.range === "month" || data.range === "year" || data.range === "all")) ? "bar" : "line";
+      }
+
+      const labels = points.map(p => p.label);
+      const peakVal = data.peaks?.selected?.value ?? 0;
+      const peakTs = data.peaks?.selected?.ts ?? null;
+
+      let datasets = [];
+      if (isBreakdown) {
+        const makeSeries = (label, key, color, fillAlpha, borderWidth, dashed = false) => ({
+          label,
+          data: points.map(p => p[key] ?? 0),
+          borderColor: color,
+          backgroundColor: chartType === "bar" ? color : fillAlpha,
+          borderWidth,
+          borderDash: dashed ? [5, 4] : [],
+          fill: chartType === "line" && key === "total",
+          tension: 0.25,
+          pointRadius: points.length <= 48 ? 3.5 : 1.5,
+          pointHoverRadius: 6,
+          _peakTimeKey: `${key}_peak_time`
+        });
+        datasets = [
+          makeSeries("Total Wi-Fi Peak", "total", "#38bdf8", "rgba(56, 189, 248, 0.12)", 2.8),
+          makeSeries("eduroam", "eduroam", "#818cf8", "rgba(129, 140, 248, 0.08)", 2.2),
+          makeSeries("UoP Visitor", "uop_visitor", "#f472b6", "rgba(244, 114, 182, 0.08)", 2.0),
+          makeSeries("UoP Connect", "uop_connect", "#2dd4bf", "rgba(45, 212, 191, 0.08)", 2.0),
+          makeSeries("Other SSIDs", "other", "#94a3b8", "rgba(148, 163, 184, 0.06)", 1.5, true)
+        ];
+      } else {
+        const colorMap = {
+          total: "#38bdf8",
+          eduroam: "#818cf8",
+          uop_visitor: "#f472b6",
+          uop_connect: "#2dd4bf",
+          other: "#94a3b8"
+        };
+        const baseColor = colorMap[data.ssid] || "#38bdf8";
+        const isPeakPoint = p => peakTs !== null && p.selected_peak_ts === peakTs && p.selected === peakVal;
+        datasets = [{
+          label: `${data.ssid_label} Concurrent Peak`,
+          data: points.map(p => p.selected ?? 0),
+          borderColor: baseColor,
+          backgroundColor: chartType === "bar"
+            ? points.map(p => isPeakPoint(p) ? "#fbbf24" : baseColor)
+            : "rgba(56, 189, 248, 0.16)",
+          borderWidth: chartType === "bar" ? 0 : 2.6,
+          borderRadius: chartType === "bar" ? 4 : 0,
+          fill: chartType === "line",
+          tension: 0.25,
+          pointRadius: points.map(p => isPeakPoint(p) ? 7 : (points.length <= 48 ? 3.5 : 1.5)),
+          pointBackgroundColor: points.map(p => isPeakPoint(p) ? "#fbbf24" : baseColor),
+          pointHoverRadius: 7,
+          _peakTimeKey: "selected_peak_time"
+        }];
+      }
+
+      if (historyChart) historyChart.destroy();
+      historyChart = new Chart(document.getElementById("historyChart"), {
+        type: chartType,
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          onHover: (event, elements) => {
+            const canvas = event?.native?.target;
+            if (!canvas) return;
+            if (elements && elements.length) {
+              const p = points[elements[0].index];
+              canvas.style.cursor = p && p.drill_target ? "pointer" : "default";
+            } else {
+              canvas.style.cursor = "default";
+            }
+          },
+          onClick: (event, elements) => {
+            if (!elements || !elements.length) return;
+            const p = points[elements[0].index];
+            if (p && p.drill_target) {
+              drillIntoHistory(p.drill_target);
+            }
+          },
+          scales: {
+            x: {
+              ticks: { color: "#94a3b8", maxRotation: 0, autoSkip: true, maxTicksLimit: 12 },
+              grid: { display: false }
+            },
+            y: {
+              beginAtZero: true,
+              ticks: { color: "#94a3b8" },
+              grid: { color: "#1e293b" }
+            }
+          },
+          plugins: {
+            legend: {
+              labels: { color: "#cbd5e1", boxWidth: 12, padding: 14 }
+            },
+            tooltip: {
+              callbacks: {
+                title: items => {
+                  if (!items.length) return "";
+                  const p = points[items[0].dataIndex];
+                  return p ? p.full_label : items[0].label;
+                },
+                label: ctx => {
+                  const p = points[ctx.dataIndex];
+                  const val = typeof ctx.parsed.y === "number" ? ctx.parsed.y.toLocaleString() : ctx.formattedValue;
+                  const timeKey = ctx.dataset._peakTimeKey;
+                  const peakWhen = (p && timeKey && p[timeKey]) ? ` · peak ${p[timeKey]}` : "";
+                  return `${ctx.dataset.label}: ${val}${peakWhen}`;
+                },
+                footer: items => {
+                  if (!items.length) return "";
+                  const p = points[items[0].dataIndex];
+                  return p && p.drill_target ? `Click to drill down → ${p.drill_target.label}` : "";
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+    function renderHistory(data) {
+      histState.data = data;
+      document.querySelectorAll("[data-hist-range]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.histRange === data.range)
+      );
+      populateHistorySsidOptions(data.available_ssids || []);
+
+      const peaks = data.peaks || {};
+      const selPeak = peaks.selected || {};
+      const edPeak = peaks.eduroam || {};
+      const visPeak = peaks.uop_visitor || {};
+      const conPeak = peaks.uop_connect || {};
+      const hasSamples = (data.sample_count || 0) > 0;
+
+      document.getElementById("kpiHistPeakLabel").textContent = `Period Peak (${data.ssid_label || "Total Wi-Fi"})`;
+      document.getElementById("kpiHistPeakVal").textContent = hasSamples ? fmtNum(selPeak.value) : "--";
+      document.getElementById("kpiHistPeakSub").textContent = hasSamples && selPeak.time_label ? `Peak on ${selPeak.time_label}` : "No samples in period";
+
+      document.getElementById("kpiHistEduroam").textContent = hasSamples ? fmtNum(edPeak.value) : "--";
+      document.getElementById("kpiHistEduroamSub").textContent = hasSamples && edPeak.short_time ? `Peak: ${edPeak.short_time}` : "--";
+
+      document.getElementById("kpiHistVisitor").textContent = hasSamples ? fmtNum(visPeak.value) : "--";
+      document.getElementById("kpiHistVisitorSub").textContent = hasSamples && visPeak.short_time ? `Peak: ${visPeak.short_time}` : "--";
+
+      document.getElementById("kpiHistConnect").textContent = hasSamples ? fmtNum(conPeak.value) : "--";
+      document.getElementById("kpiHistConnectSub").textContent = hasSamples && conPeak.short_time ? `Peak: ${conPeak.short_time}` : "--";
+
+      const navPeakBadge = document.getElementById("navHistoryPeak");
+      if (navPeakBadge) {
+        const totalPeak = peaks.total?.value;
+        navPeakBadge.textContent = hasSamples && typeof totalPeak === "number" ? `Peak ${fmtNum(totalPeak)}` : "--";
+        navPeakBadge.className = "pill neutral";
+      }
+
+      document.getElementById("histChartTitle").textContent = `Concurrent Wi-Fi Peaks — ${data.period_label || ""}`;
+      document.getElementById("histGranularityBadge").textContent = data.granularity_label || "";
+      document.getElementById("histPeriodLabel").textContent = data.period_label || "";
+
+      const prevBtn = document.getElementById("histPrevBtn");
+      const nextBtn = document.getElementById("histNextBtn");
+      const latestBtn = document.getElementById("histLatestBtn");
+      if (prevBtn) prevBtn.disabled = !data.prev_anchor;
+      if (nextBtn) nextBtn.disabled = !data.next_anchor;
+      if (latestBtn) latestBtn.disabled = !data.anchor;
+
+      renderHistoryBreadcrumbs(data);
+
+      const canDrill = (data.points || []).some(p => p.drill_target);
+      document.getElementById("histDrillHint").textContent = canDrill
+        ? "Tip: Click any point or bar on the graph to drill down into that period."
+        : (data.range === "day" ? "Showing 15-minute concurrent peaks for this day." : "Select Week, Month, Year, or All Time to drill down.");
+
+      const covParts = [`${fmtNum(data.sample_count || 0)} samples in view`];
+      if (data.first_sample_label) covParts.push(`Recording since ${data.first_sample_label}`);
+      if (data.timezone) covParts.push(data.timezone);
+      document.getElementById("histCoverageMeta").textContent = covParts.join(" · ");
+
+      if (activeTabId === "tab-history") {
+        renderHistoryChart(data);
+      }
+      renderWallboardTabs();
+    }
+    async function loadHistory(silent = false) {
+      const qs = new URLSearchParams({ range: histState.range, ssid: histState.ssid });
+      if (histState.anchor) qs.set("anchor", histState.anchor);
+      try {
+        const res = await fetch(`/api/history?${qs.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || data.login_required) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        renderHistory(data);
+      } catch (err) {
+        if (!silent) {
+          const banner = document.getElementById("errorBanner");
+          banner.textContent = "Error loading Wi-Fi history: " + err.message;
+          banner.style.display = "block";
+        }
+      }
+    }
+    function exportHistoryCsv() {
+      const d = histState.data;
+      const points = d?.points || [];
+      if (!points.length) return;
+      const slug = `${d.range || "day"}-${d.anchor || "latest"}`;
+      downloadCsv(
+        `mist-wifi-peaks-${slug}.csv`,
+        ["Bucket", "Period", "Total Wi-Fi Peak", "Total Peak Time", "eduroam Peak", "UoP Visitor Peak", "UoP Connect Peak", "Other SSIDs Peak", "Selected Series Peak", "Samples"],
+        points.map(p => [
+          p.key ?? "",
+          p.full_label ?? "",
+          p.total ?? 0,
+          p.total_peak_time ?? "",
+          p.eduroam ?? 0,
+          p.uop_visitor ?? 0,
+          p.uop_connect ?? 0,
+          p.other ?? 0,
+          p.selected ?? 0,
+          p.samples ?? 0
+        ])
+      );
+    }
+
     async function handleLogout() {
       const btn = document.getElementById("logoutBtn");
       if (btn) btn.disabled = true;

@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, redirect, request, send_from_directory, session as flask_session
 import requests
 
+from history_store import init_history_db, query_history, record_snapshot
+
 
 def load_dotenv(path: Path) -> None:
     if not path.exists():
@@ -54,6 +56,10 @@ MIN_REFRESH_INTERVAL = 15
 AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "1").strip().lower() not in ("0", "false", "no")
 SESSION_LIFETIME_HOURS = int(os.getenv("SESSION_LIFETIME_HOURS", "12"))
 HTTPS_ENABLED = os.getenv("HTTPS_ENABLED", "").strip().lower() in ("1", "true", "yes")
+HISTORY_DB_PATH = Path(os.getenv("HISTORY_DB_PATH", str(BASE_DIR / "history.db")))
+HISTORY_SAMPLE_INTERVAL_SECONDS = max(60, int(os.getenv("HISTORY_SAMPLE_INTERVAL_SECONDS", "300")))
+
+init_history_db(HISTORY_DB_PATH)
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = load_or_create_secret_key(BASE_DIR)
@@ -1083,6 +1089,11 @@ def api_stats():
         _cache_data = fresh_data
         _cache_timestamp = time.time()
 
+    try:
+        record_snapshot(HISTORY_DB_PATH, fresh_data)
+    except Exception:
+        pass
+
     payload = dict(fresh_data)
     payload["cached"] = False
     payload["cache_age_seconds"] = 0
@@ -1090,6 +1101,73 @@ def api_stats():
     resp = jsonify(payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+@app.get("/api/history")
+def api_history():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+
+    range_type = (request.args.get("range") or "day").strip().lower()
+    anchor = (request.args.get("anchor") or "").strip() or None
+    ssid = (request.args.get("ssid") or "all").strip() or "all"
+
+    try:
+        data = query_history(
+            HISTORY_DB_PATH,
+            range_type=range_type,
+            anchor=anchor,
+            ssid=ssid,
+        )
+    except Exception as exc:
+        return jsonify({"error": f"Failed to load Wi-Fi history: {exc}"}), 500
+
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+_collector_started = False
+_collector_lock = threading.Lock()
+
+
+def _history_collector_loop() -> None:
+    """Continuously record Mist Wi-Fi client snapshots in the background so peaks are never missed."""
+    global _cache_data, _cache_timestamp
+    time.sleep(8)
+    while True:
+        try:
+            with _cache_lock:
+                cache_age = time.time() - _cache_timestamp
+                has_recent_cache = _cache_data is not None and cache_age < max(
+                    60, HISTORY_SAMPLE_INTERVAL_SECONDS - 15
+                )
+            if not has_recent_cache:
+                fresh_data = collect_mist_snapshot()
+                with _cache_lock:
+                    _cache_data = fresh_data
+                    _cache_timestamp = time.time()
+                record_snapshot(HISTORY_DB_PATH, fresh_data)
+        except Exception:
+            pass
+        time.sleep(HISTORY_SAMPLE_INTERVAL_SECONDS)
+
+
+def _start_history_collector() -> None:
+    global _collector_started
+    if os.getenv("DISABLE_BACKGROUND_COLLECTOR", "").strip() == "1":
+        return
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return
+    with _collector_lock:
+        if _collector_started:
+            return
+        _collector_started = True
+        thread = threading.Thread(target=_history_collector_loop, name="mist-history-collector", daemon=True)
+        thread.start()
+
+
+_start_history_collector()
 
 
 if __name__ == "__main__":

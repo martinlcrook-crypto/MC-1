@@ -35,11 +35,26 @@ jobs:
           fi
           .venv/bin/pip install --quiet -r requirements.txt
 
-          # Allow ec2-user to bind port 80 cleanly across Amazon Linux 2 / 2023
-          printf 'net.ipv4.ip_unprivileged_port_start=80\n' | sudo tee /etc/sysctl.d/99-mist-http.conf >/dev/null
-          sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
+          # Keep mist-dashboard reliably serving on 8080 (or 80+8080 if port 80 is free)
+          PORT80_OWNER=""
+          if sudo systemctl is-active --quiet nginx 2>/dev/null; then
+            PORT80_OWNER="nginx"
+          elif sudo systemctl is-active --quiet httpd 2>/dev/null; then
+            PORT80_OWNER="httpd"
+          elif sudo systemctl is-active --quiet apache2 2>/dev/null; then
+            PORT80_OWNER="apache2"
+          fi
+          echo "Detected port 80 service: ${PORT80_OWNER:-none}"
 
-          sudo tee /etc/systemd/system/mist-dashboard.service >/dev/null <<'UNIT'
+          if [ -z "$PORT80_OWNER" ]; then
+            printf 'net.ipv4.ip_unprivileged_port_start=80\n' | sudo tee /etc/sysctl.d/99-mist-http.conf >/dev/null
+            sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
+            WAITRESS_LISTEN='0.0.0.0:80 0.0.0.0:8080'
+          else
+            WAITRESS_LISTEN='0.0.0.0:8080'
+          fi
+
+          sudo tee /etc/systemd/system/mist-dashboard.service >/dev/null <<UNIT
           [Unit]
           Description=Mist EU Wireless & eduroam Dashboard
           After=network-online.target
@@ -51,7 +66,7 @@ jobs:
           WorkingDirectory=/home/ec2-user/MC-1
           EnvironmentFile=/home/ec2-user/MC-1/.env
           AmbientCapabilities=CAP_NET_BIND_SERVICE
-          ExecStart=/home/ec2-user/MC-1/.venv/bin/waitress-serve --listen=0.0.0.0:80 --listen=0.0.0.0:8080 app:app
+          ExecStart=/home/ec2-user/MC-1/.venv/bin/waitress-serve --listen="${WAITRESS_LISTEN}" app:app
           Restart=always
           RestartSec=3
 
@@ -68,9 +83,65 @@ jobs:
           sudo systemctl daemon-reload
           sudo systemctl enable mist-dashboard
           sudo systemctl restart mist-dashboard
+
+          if [ "$PORT80_OWNER" = "nginx" ]; then
+            if [ ! -f /etc/nginx/nginx.conf.orig ]; then
+              sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.orig
+            fi
+            NGINX_USER="$(awk '/^user[[:space:]]+/{gsub(/;/,"",$2); print $2; exit}' /etc/nginx/nginx.conf.orig || true)"
+            NGINX_USER="${NGINX_USER:-nginx}"
+            sudo tee /etc/nginx/nginx.conf >/dev/null <<NGINX
+          user ${NGINX_USER};
+          worker_processes auto;
+          error_log /var/log/nginx/error.log;
+          pid /run/nginx.pid;
+
+          events {
+            worker_connections 1024;
+          }
+
+          http {
+            include       /etc/nginx/mime.types;
+            default_type  application/octet-stream;
+            sendfile      on;
+            keepalive_timeout 65;
+
+            server {
+              listen 80 default_server;
+              listen [::]:80 default_server;
+              server_name _;
+
+              location / {
+                proxy_pass http://127.0.0.1:8080;
+                proxy_http_version 1.1;
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+                proxy_read_timeout 120s;
+              }
+            }
+          }
+          NGINX
+            sudo setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+            sudo nginx -t
+            sudo systemctl reload nginx
+          elif [ "$PORT80_OWNER" = "httpd" ]; then
+            sudo tee /etc/httpd/conf.d/mist-dashboard.conf >/dev/null <<'HTTPD'
+          <VirtualHost *:80>
+            ProxyPreserveHost On
+            ProxyPass / http://127.0.0.1:8080/
+            ProxyPassReverse / http://127.0.0.1:8080/
+          </VirtualHost>
+          HTTPD
+            sudo setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+            sudo systemctl reload httpd
+          fi
+
           sleep 2
-          curl -sf http://127.0.0.1:80/health
+          sudo ss -tlnp '( sport = :80 or sport = :8080 )' || true
           curl -sf http://127.0.0.1:8080/health
+          curl -sf http://127.0.0.1:80/health || { sudo journalctl -u mist-dashboard -n 20 --no-pager || true; exit 1; }
 
           # Optional: keep DuckDNS updated every 5 minutes if secrets are configured
           if [ -n "$DUCKDNS_DOMAIN" ] && [ -n "$DUCKDNS_TOKEN" ]; then

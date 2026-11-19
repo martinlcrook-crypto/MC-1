@@ -88,14 +88,33 @@
     .sub-cell { display: block; font-size: 0.76rem; color: var(--muted); margin-top: 2px; }
 
     /* TV / Wallboard Mode */
-    body.wallboard-mode .container { max-width: 100%; padding: 24px 36px; }
+    .wallboard-only { display: none; }
+    .wallboard-bar { display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px 12px; margin-bottom: 18px; overflow: hidden; position: relative; }
+    .wb-bar-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .wb-tabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .wb-tab-pill { display: inline-flex; align-items: center; gap: 8px; background: var(--panel-alt); color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+    .wb-tab-pill:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
+    .wb-tab-pill.active { background: rgba(56, 189, 248, 0.16); color: var(--accent); border-color: rgba(56, 189, 248, 0.55); }
+    .wb-progress-track { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(148, 163, 184, 0.15); }
+    .wb-progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), var(--eduroam)); transition: width 0.25s linear; }
+    select.wb-select { background: var(--panel-alt); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; font-size: 0.84rem; font-weight: 600; cursor: pointer; }
+    select.wb-select:focus { outline: none; border-color: var(--accent); }
+
+    body.wallboard-mode .wallboard-only { display: inline-flex; }
+    body.wallboard-mode .wallboard-bar { display: block; }
+    body.wallboard-mode .container { max-width: 100%; padding: 20px 36px 32px; }
     body.wallboard-mode .app-shell { grid-template-columns: 1fr; }
     body.wallboard-mode .sidebar,
     body.wallboard-mode .wallboard-hide,
     body.wallboard-mode #refreshBtn,
-    body.wallboard-mode .badge { display: none !important; }
+    body.wallboard-mode .badge,
+    body.wallboard-mode input.search,
+    body.wallboard-mode .filter-group,
+    body.wallboard-mode #exportDevicesDownBtn,
+    body.wallboard-mode #exportCsvBtn,
+    body.wallboard-mode #exportSlowApsBtn { display: none !important; }
     body.wallboard-mode .title-block h1 { font-size: 2rem; }
-    body.wallboard-mode .kpi-grid { grid-template-columns: repeat(3, 1fr); gap: 22px; margin-bottom: 28px; }
+    body.wallboard-mode .kpi-grid { grid-template-columns: repeat(3, 1fr); gap: 22px; margin-bottom: 24px; }
     body.wallboard-mode .kpi-card { padding: 26px 30px; }
     body.wallboard-mode .kpi-label { font-size: 1.02rem; letter-spacing: 0.06em; }
     body.wallboard-mode .kpi-value { font-size: clamp(2.6rem, 3.8vw, 3.8rem); margin: 10px 0 8px; }
@@ -104,7 +123,14 @@
     body.wallboard-mode .kpi-visitor .kpi-value,
     body.wallboard-mode .kpi-connect .kpi-value { font-size: clamp(3.6rem, 5.8vw, 5.6rem); line-height: 1.05; }
     body.wallboard-mode .kpi-sub { font-size: 1.05rem; }
-    body.wallboard-mode .chart-wrap { height: 320px; }
+    body.wallboard-mode .chart-wrap { height: 310px; }
+    body.wallboard-mode .panel-title { font-size: 1.25rem; }
+    body.wallboard-mode .table-wrap,
+    body.wallboard-mode .alarm-list { max-height: 68vh; }
+    body.wallboard-mode table { font-size: 1rem; }
+    body.wallboard-mode th,
+    body.wallboard-mode td { padding: 12px 14px; }
+    body.wallboard-mode .alarm-item { font-size: 1rem; padding: 14px 16px; }
   </style>
 </head>
 <body>
@@ -121,12 +147,29 @@
       <div class="controls">
         <span class="meta-text" id="lastUpdated">Fetching...</span>
         <span id="authUserBadge" class="badge user wallboard-hide" style="display:none;"></span>
+        <select id="wbIntervalSelect" class="wb-select wallboard-only" title="Rotation interval" onchange="setWallboardInterval(this.value)">
+          <option value="10">Cycle: 10s</option>
+          <option value="15" selected>Cycle: 15s</option>
+          <option value="20">Cycle: 20s</option>
+          <option value="30">Cycle: 30s</option>
+          <option value="60">Cycle: 60s</option>
+        </select>
+        <button id="wbPauseBtn" class="btn-secondary wallboard-only" onclick="toggleWallboardPause()">Pause</button>
         <button id="wallboardBtn" class="btn-secondary" onclick="toggleWallboardMode()">TV / Wallboard Mode</button>
         <button id="refreshBtn" onclick="loadStats(true)">Refresh Now</button>
         <button id="logoutBtn" class="btn-secondary wallboard-hide" style="display:none;" onclick="handleLogout()">Sign Out</button>
       </div>
     </header>
     <div id="errorBanner" class="error-banner"></div>
+    <div id="wallboardBar" class="wallboard-bar">
+      <div class="wb-bar-top">
+        <div id="wbTabs" class="wb-tabs"></div>
+        <span id="wbStatusText" class="meta-text">Next tab in 15s</span>
+      </div>
+      <div class="wb-progress-track">
+        <div id="wbProgressFill" class="wb-progress-fill"></div>
+      </div>
+    </div>
 
     <div class="app-shell">
       <aside class="sidebar">
@@ -338,7 +381,20 @@
     </div>
   </div>
   <script>
+    const WALLBOARD_TABS = [
+      { id: "tab-home", label: "Homescreen", countId: "navUsersCount" },
+      { id: "tab-devices-down", label: "Devices Down", countId: "navDevicesDownCount" },
+      { id: "tab-sites", label: "All Site Breakdown", countId: "navSitesCount" },
+      { id: "tab-ap-issues", label: "APs < 1Gb", countId: "navApIssuesCount" },
+      { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
+    ];
     let latestData = null, ssidChart = null, bandChart = null, siteChart = null, countdown = 60, devicesDownTypeFilter = "all";
+    let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
+    try {
+      const savedWb = parseInt(localStorage.getItem("mist_wb_interval") || "", 10);
+      if (Number.isFinite(savedWb) && savedWb >= 5 && savedWb <= 300) wbIntervalSec = savedWb;
+    } catch (e) {}
+
     function fmtNum(n) { return typeof n === "number" ? n.toLocaleString() : "--"; }
     function escapeHtml(str) { return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
     function fmtLastSeen(ts) {
@@ -359,12 +415,104 @@
       }
       return { label: d.toLocaleString(), rel };
     }
+    function renderWallboardTabs() {
+      const wrap = document.getElementById("wbTabs");
+      if (!wrap) return;
+      wrap.innerHTML = WALLBOARD_TABS.map(t => {
+        const srcBadge = document.getElementById(t.countId);
+        const badgeText = srcBadge ? srcBadge.textContent : "--";
+        const badgeCls = srcBadge ? srcBadge.className : "pill neutral";
+        return `<button type="button" class="wb-tab-pill ${t.id === activeTabId ? "active" : ""}" onclick="jumpWallboardTab('${t.id}')"><span>${escapeHtml(t.label)}</span><span class="${escapeHtml(badgeCls)}">${escapeHtml(badgeText)}</span></button>`;
+      }).join("");
+    }
+    function updateWallboardProgress() {
+      const fill = document.getElementById("wbProgressFill");
+      const statusEl = document.getElementById("wbStatusText");
+      if (!fill || !statusEl) return;
+      const totalMs = wbIntervalSec * 1000;
+      const pct = Math.min(100, Math.max(0, (wbElapsedMs / totalMs) * 100));
+      fill.style.width = `${pct}%`;
+      if (wbPaused) {
+        statusEl.textContent = "Paused · press Space or Resume";
+      } else {
+        const remainSec = Math.max(1, Math.ceil((totalMs - wbElapsedMs) / 1000));
+        const curIdx = WALLBOARD_TABS.findIndex(t => t.id === activeTabId);
+        const nextTab = WALLBOARD_TABS[(curIdx + 1) % WALLBOARD_TABS.length];
+        statusEl.textContent = `Next: ${nextTab.label} in ${remainSec}s`;
+      }
+    }
     function switchTab(tabId) {
+      activeTabId = tabId;
       document.querySelectorAll(".tab-pane").forEach(el => el.classList.toggle("active", el.id === tabId));
       document.querySelectorAll(".nav-tab").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === tabId));
+      const activePane = document.getElementById(tabId);
+      if (activePane) {
+        activePane.querySelectorAll(".table-wrap, .alarm-list").forEach(el => { el.scrollTop = 0; });
+      }
+      renderWallboardTabs();
+      if (wbActive) updateWallboardProgress();
       if (tabId === "tab-home" && latestData) {
         setTimeout(() => renderCharts(latestData), 30);
       }
+    }
+    function jumpWallboardTab(tabId) {
+      wbElapsedMs = 0;
+      switchTab(tabId);
+    }
+    function stepWallboardTab(delta) {
+      const curIdx = WALLBOARD_TABS.findIndex(t => t.id === activeTabId);
+      const nextIdx = ((curIdx < 0 ? 0 : curIdx) + delta + WALLBOARD_TABS.length) % WALLBOARD_TABS.length;
+      wbElapsedMs = 0;
+      switchTab(WALLBOARD_TABS[nextIdx].id);
+    }
+    function setWallboardInterval(val) {
+      const parsed = parseInt(val, 10);
+      if (!Number.isFinite(parsed) || parsed < 5 || parsed > 300) return;
+      wbIntervalSec = parsed;
+      wbElapsedMs = 0;
+      const sel = document.getElementById("wbIntervalSelect");
+      if (sel && sel.value !== String(parsed)) {
+        if (![...sel.options].some(o => o.value === String(parsed))) {
+          const opt = document.createElement("option");
+          opt.value = String(parsed);
+          opt.textContent = `Cycle: ${parsed}s`;
+          sel.appendChild(opt);
+        }
+        sel.value = String(parsed);
+      }
+      try { localStorage.setItem("mist_wb_interval", String(parsed)); } catch (e) {}
+      if (wbActive) updateWallboardProgress();
+    }
+    function toggleWallboardPause() {
+      wbPaused = !wbPaused;
+      const btn = document.getElementById("wbPauseBtn");
+      if (btn) {
+        btn.textContent = wbPaused ? "Resume" : "Pause";
+        btn.classList.toggle("active", wbPaused);
+      }
+      if (wbActive) updateWallboardProgress();
+    }
+    function startWallboardCycle() {
+      stopWallboardCycle();
+      wbElapsedMs = 0;
+      renderWallboardTabs();
+      updateWallboardProgress();
+      wbTimer = setInterval(() => {
+        if (!wbActive || wbPaused) return;
+        wbElapsedMs += 250;
+        if (wbElapsedMs >= wbIntervalSec * 1000) {
+          stepWallboardTab(1);
+        } else {
+          updateWallboardProgress();
+        }
+      }, 250);
+    }
+    function stopWallboardCycle() {
+      if (wbTimer) {
+        clearInterval(wbTimer);
+        wbTimer = null;
+      }
+      wbElapsedMs = 0;
     }
     function setDeviceDownFilter(type) {
       devicesDownTypeFilter = type;
@@ -410,13 +558,27 @@
         (ap.switch_port || "").toLowerCase().includes(q)
       );
     }
-    function toggleWallboardMode() {
-      const active = document.body.classList.toggle("wallboard-mode");
+    function toggleWallboardMode(forceState) {
+      const nextActive = typeof forceState === "boolean" ? forceState : !document.body.classList.contains("wallboard-mode");
+      document.body.classList.toggle("wallboard-mode", nextActive);
+      wbActive = nextActive;
       const btn = document.getElementById("wallboardBtn");
-      btn.classList.toggle("active", active);
-      btn.textContent = active ? "Exit Wallboard" : "TV / Wallboard Mode";
-      if (active) switchTab("tab-home");
-      else if (latestData) setTimeout(() => renderCharts(latestData), 50);
+      btn.classList.toggle("active", nextActive);
+      btn.textContent = nextActive ? "Exit Wallboard" : "TV / Wallboard Mode";
+      if (nextActive) {
+        wbPaused = false;
+        const pauseBtn = document.getElementById("wbPauseBtn");
+        if (pauseBtn) {
+          pauseBtn.textContent = "Pause";
+          pauseBtn.classList.remove("active");
+        }
+        setWallboardInterval(wbIntervalSec);
+        switchTab("tab-home");
+        startWallboardCycle();
+      } else {
+        stopWallboardCycle();
+        if (activeTabId === "tab-home" && latestData) setTimeout(() => renderCharts(latestData), 50);
+      }
     }
     function downloadCsv(filename, headers, rows) {
       const csvEscape = val => {
@@ -703,6 +865,7 @@
         logoutBtn.style.display = "none";
       }
 
+      renderWallboardTabs();
       const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "just now";
       document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`;
     }
@@ -730,11 +893,25 @@
       } catch (err) { banner.textContent = "Error loading Mist data: " + err.message; banner.style.display = "block"; }
       finally { btn.disabled = false; }
     }
+    document.addEventListener("keydown", ev => {
+      if (!wbActive) return;
+      if (ev.target && ["INPUT", "TEXTAREA", "SELECT"].includes(ev.target.tagName)) return;
+      if (ev.key === "ArrowRight") { ev.preventDefault(); stepWallboardTab(1); }
+      else if (ev.key === "ArrowLeft") { ev.preventDefault(); stepWallboardTab(-1); }
+      else if (ev.key === " " || ev.code === "Space") { ev.preventDefault(); toggleWallboardPause(); }
+      else if (ev.key === "Escape") { ev.preventDefault(); toggleWallboardMode(false); }
+    });
     setInterval(() => {
       countdown -= 1;
       if (countdown <= 0) { countdown = 60; loadStats(false); }
       else if (latestData) { const fetched = latestData.fetched_at ? new Date(latestData.fetched_at).toLocaleTimeString() : "just now"; document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`; }
     }, 1000);
+    (() => {
+      const params = new URLSearchParams(window.location.search);
+      const qInterval = params.get("interval");
+      if (qInterval) setWallboardInterval(qInterval);
+      if (params.get("wallboard") === "1") toggleWallboardMode(true);
+    })();
     loadStats(false);
   </script>
 </body>

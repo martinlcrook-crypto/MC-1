@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 import re
+import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
@@ -245,9 +246,11 @@ def collect_nac_server_rejects(
     duration: str = "24h",
     site_name_map: Optional[Dict[str, str]] = None,
     switch_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    now_ts: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Strictly read-only collector for devices that received Server Reject on a NAC port profile.
+    Strictly read-only collector for devices that received Server Reject on a NAC port profile
+    within the last 24 hours.
     Combines:
       1. Org Switch Templates (networktemplates) to identify NAC port profiles & server_reject_network VLANs
       2. Wired Client Search (auth_state=server_reject and configured server_reject_network VLANs)
@@ -255,9 +258,11 @@ def collect_nac_server_rejects(
       4. Switch 802.1X Server-Reject Events (devices/events/search?device_type=switch&text=reject)
       5. Switch Port Stats enrichment (stats/ports/search) to resolve the exact NAC port profile (port_usage)
     """
-    valid_durations = {"1h": "1h", "24h": "1d", "1d": "1d", "7d": "7d"}
-    mist_duration = valid_durations.get((duration or "24h").strip().lower(), "1d")
-    display_duration = "24h" if mist_duration == "1d" else mist_duration
+    end_ts = int(now_ts if now_ts is not None else time.time())
+    cutoff_ts = end_ts - 86400
+    mist_duration = "1d"
+    display_duration = "24h"
+    time_window_params = {"start": cutoff_ts, "end": end_ts, "duration": mist_duration}
 
     warnings: List[str] = []
     sites_by_id = dict(site_name_map or {})
@@ -308,7 +313,7 @@ def collect_nac_server_rejects(
                 session,
                 api_host,
                 f"/api/v1/orgs/{org_id}/wired_clients/search",
-                {"auth_state": "server_reject", "duration": mist_duration, "limit": 1000},
+                {"auth_state": "server_reject", **time_window_params, "limit": 1000},
             ),
             [],
         )
@@ -319,7 +324,7 @@ def collect_nac_server_rejects(
                 session,
                 api_host,
                 f"/api/v1/orgs/{org_id}/nac_clients/search",
-                {"status": "denied", "type": "wired", "duration": mist_duration, "limit": 1000},
+                {"status": "denied", "type": "wired", **time_window_params, "limit": 1000},
             ),
             [],
         )
@@ -330,7 +335,7 @@ def collect_nac_server_rejects(
                 session,
                 api_host,
                 f"/api/v1/orgs/{org_id}/devices/events/search",
-                {"device_type": "switch", "text": "reject", "duration": mist_duration, "limit": 1000},
+                {"device_type": "switch", "text": "reject", **time_window_params, "limit": 1000},
                 max_pages=2,
             ),
             [],
@@ -373,7 +378,7 @@ def collect_nac_server_rejects(
                 session,
                 api_host,
                 f"/api/v1/orgs/{org_id}/wired_clients/search",
-                {"vlan": vlan_csv, "duration": mist_duration, "limit": 1000},
+                {"vlan": vlan_csv, **time_window_params, "limit": 1000},
             ),
             [],
         )
@@ -559,6 +564,13 @@ def collect_nac_server_rejects(
                 "sources": ["switch_events"],
             },
         )
+
+    # Strictly keep only records observed within the last 24 hours
+    records = {
+        k: r
+        for k, r in records.items()
+        if isinstance(r.get("timestamp"), (int, float)) and float(r["timestamp"]) >= cutoff_ts
+    }
 
     # Phase 3: Enrich affected switch ports with exact Port Profile (port_usage) via stats/ports/search
     affected_sw_macs = sorted(

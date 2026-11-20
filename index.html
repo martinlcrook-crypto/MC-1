@@ -531,15 +531,10 @@
           <div class="panel">
             <div class="panel-header">
               <div class="panel-actions">
-                <h2 class="panel-title">NAC Port Profile Server Rejects</h2>
+                <h2 class="panel-title">NAC Port Profile Server Rejects (Last 24h)</h2>
                 <span id="nacRejectsBadge" class="pill neutral">Loading...</span>
               </div>
               <div class="panel-actions nac-controls">
-                <div class="filter-group">
-                  <button class="filter-btn" data-nac-dur="1h" onclick="setNacDuration('1h')">1h</button>
-                  <button class="filter-btn active" data-nac-dur="24h" onclick="setNacDuration('24h')">24h</button>
-                  <button class="filter-btn" data-nac-dur="7d" onclick="setNacDuration('7d')">7d</button>
-                </div>
                 <select id="nacProfileFilter" class="wb-select" title="Filter by NAC Port Profile" onchange="setNacProfileFilter(this.value)">
                   <option value="all">All Port Profiles</option>
                 </select>
@@ -1577,13 +1572,6 @@
       );
     }
 
-    function setNacDuration(dur) {
-      nacState.duration = dur || "24h";
-      document.querySelectorAll("[data-nac-dur]").forEach(btn =>
-        btn.classList.toggle("active", btn.dataset.nacDur === nacState.duration)
-      );
-      loadNacRejects(false, false);
-    }
     function setNacProfileFilter(prof) {
       nacState.profile = prof || "all";
       renderNacRejectsTable();
@@ -1637,7 +1625,7 @@
 
       if (!filtered.length) {
         const msg = allDevices.length === 0
-          ? `No devices with Server Reject found in the last ${escapeHtml(nacState.duration)}.`
+          ? "No devices with Server Reject found in the last 24 hours."
           : "No rejected devices match the current filter.";
         tbody.innerHTML = `<tr><td colspan="7" class="empty">${msg}</td></tr>`;
         return;
@@ -1685,13 +1673,8 @@
       const sum = data.summary || {};
       const total = sum.total_rejected ?? 0;
 
-      document.querySelectorAll("[data-nac-dur]").forEach(btn =>
-        btn.classList.toggle("active", btn.dataset.nacDur === (data.duration || nacState.duration))
-      );
-
       document.getElementById("kpiNacTotal").textContent = fmtNum(total);
-      const durLabels = { "1h": "Last 1 hour", "24h": "Last 24 hours", "7d": "Last 7 days" };
-      document.getElementById("kpiNacTotalSub").textContent = durLabels[data.duration] || `Last ${data.duration || "24h"}`;
+      document.getElementById("kpiNacTotalSub").textContent = "Last 24 hours";
       document.getElementById("kpiNacTotalCard").className = `kpi-card ${total > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
 
       document.getElementById("kpiNacSwitches").textContent = fmtNum(sum.affected_switches ?? 0);

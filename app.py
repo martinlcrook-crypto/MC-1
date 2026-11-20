@@ -1140,8 +1140,7 @@ def api_nac_rejects():
     if not MIST_ORG_ID or not MIST_API_TOKEN:
         return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
 
-    raw_duration = (request.args.get("duration") or "24h").strip().lower()
-    duration = raw_duration if raw_duration in ("1h", "24h", "7d") else "24h"
+    duration = "24h"
     force_refresh = request.args.get("refresh") == "1"
     now = time.time()
 

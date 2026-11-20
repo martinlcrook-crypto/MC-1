@@ -196,7 +196,7 @@ jobs:
             sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80 >/dev/null
             WAITRESS_LISTEN='0.0.0.0:80 0.0.0.0:8080'
           else
-            WAITRESS_LISTEN='0.0.0.0:8080'
+            WAITRESS_LISTEN='127.0.0.1:8080'
           fi
 
           sudo tee /etc/systemd/system/mist-dashboard.service >/dev/null <<UNIT

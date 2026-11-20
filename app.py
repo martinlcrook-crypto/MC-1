@@ -12,6 +12,7 @@ import requests
 
 from history_store import init_history_db, query_history, record_snapshot
 from nac_rejects import collect_nac_server_rejects
+from client_lookup import get_wifi_client_detail, search_wifi_clients
 
 
 def load_dotenv(path: Path) -> None:
@@ -1192,6 +1193,94 @@ def api_nac_rejects():
     out["cached"] = False
     out["cache_age_seconds"] = 0
     resp = jsonify(out)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _cached_site_name_map() -> Optional[Dict[str, str]]:
+    site_name_map: Dict[str, str] = {}
+    with _cache_lock:
+        if isinstance(_cache_data, dict):
+            for s in _cache_data.get("sites") or []:
+                if isinstance(s, dict) and s.get("id"):
+                    site_name_map[str(s["id"])] = str(s.get("name") or s["id"])
+    return site_name_map or None
+
+
+@app.get("/api/client-lookup/search")
+def api_client_lookup_search():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    query = (request.args.get("q") or "").strip()
+    mode = (request.args.get("mode") or "auto").strip().lower()
+    duration = (request.args.get("duration") or "7d").strip().lower()
+
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Token {MIST_API_TOKEN}", "Accept": "application/json"})
+    try:
+        data = search_wifi_clients(
+            session=session,
+            api_host=MIST_API_HOST,
+            org_id=MIST_ORG_ID,
+            query=query,
+            mode=mode,
+            duration=duration,
+            site_name_map=_cached_site_name_map(),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
+    except Exception as exc:
+        return jsonify({"error": f"Client lookup failed: {exc}"}), 502
+    finally:
+        session.close()
+
+    data["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/api/client-lookup/detail")
+def api_client_lookup_detail():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    mac = (request.args.get("mac") or "").strip()
+    site_id = (request.args.get("site_id") or "").strip() or None
+    duration = (request.args.get("duration") or "7d").strip().lower()
+
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Token {MIST_API_TOKEN}", "Accept": "application/json"})
+    try:
+        data = get_wifi_client_detail(
+            session=session,
+            api_host=MIST_API_HOST,
+            org_id=MIST_ORG_ID,
+            mac=mac,
+            site_id=site_id,
+            duration=duration,
+            site_name_map=_cached_site_name_map(),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
+    except Exception as exc:
+        return jsonify({"error": f"Failed to load client details: {exc}"}), 502
+    finally:
+        session.close()
+
+    data["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    resp = jsonify(data)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

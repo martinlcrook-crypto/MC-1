@@ -150,6 +150,22 @@
     body.wallboard-mode #exportNacRejectsBtn { display: none !important; }
     body.wallboard-mode #tab-history .kpi-grid,
     body.wallboard-mode #tab-nac-rejects .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+
+    /* Wi-Fi Client Lookup Tab */
+    .lookup-form { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    .lookup-input { flex: 1 1 300px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 0.94rem; }
+    .lookup-input:focus { outline: none; border-color: var(--accent); }
+    tr.clickable-row { cursor: pointer; }
+    tr.clickable-row.selected-row td { background: rgba(56, 189, 248, 0.14); }
+    .detail-meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin-bottom: 18px; }
+    .detail-chip { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+    .detail-chip-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; margin-bottom: 3px; }
+    .detail-chip-val { font-size: 0.88rem; font-weight: 600; color: var(--text); word-break: break-word; }
+    .rssi-bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; vertical-align: middle; margin-right: 6px; }
+    .rssi-bars span { width: 3px; border-radius: 1px; background: var(--border); }
+    .rssi-bars span.on-ok { background: var(--green); }
+    .rssi-bars span.on-warn { background: var(--amber); }
+    .rssi-bars span.on-bad { background: var(--red); }
   </style>
 </head>
 <body>
@@ -219,6 +235,10 @@
         <button class="nav-tab" data-tab="tab-alarms" onclick="switchTab('tab-alarms')">
           <span>Recent Alarms</span>
           <span id="navAlarmsCount" class="pill neutral">0</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-client-lookup" onclick="switchTab('tab-client-lookup')">
+          <span>Wi-Fi Client Lookup</span>
+          <span class="pill type-ap">Search</span>
         </button>
       </aside>
 
@@ -550,6 +570,169 @@
             </div>
           </div>
         </div>
+
+        <!-- TAB 8: WI-FI CLIENT LOOKUP -->
+        <div id="tab-client-lookup" class="tab-pane">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title">Wi-Fi Client Lookup (Current &amp; Past Connections)</h2>
+                <span id="lookupStatusBadge" class="pill neutral">Ready</span>
+              </div>
+              <div class="filter-group">
+                <button class="filter-btn" data-lookup-dur="1h" onclick="setLookupDuration('1h')">1h</button>
+                <button class="filter-btn" data-lookup-dur="24h" onclick="setLookupDuration('24h')">24h</button>
+                <button class="filter-btn active" data-lookup-dur="7d" onclick="setLookupDuration('7d')">7d</button>
+                <button class="filter-btn" data-lookup-dur="30d" onclick="setLookupDuration('30d')">30d</button>
+              </div>
+            </div>
+            <form class="lookup-form" onsubmit="handleClientLookupSubmit(event)">
+              <input id="clientLookupQuery" class="lookup-input" type="search" placeholder="Enter MAC address (aa:bb:cc:dd:ee:ff), IP (10.x.x.x), username (up123456@port.ac.uk), or hostname..." autocomplete="off" />
+              <select id="clientLookupMode" class="wb-select" title="Search field">
+                <option value="auto">Auto-detect</option>
+                <option value="mac">MAC Address</option>
+                <option value="ip">IP Address</option>
+                <option value="username">Username</option>
+                <option value="hostname">Hostname</option>
+              </select>
+              <button id="clientLookupBtn" type="submit">Search Wi-Fi</button>
+              <button type="button" class="btn-secondary" onclick="clearClientLookup()">Clear</button>
+            </form>
+            <div id="lookupErrorBox" class="error-banner" style="margin-top:12px;margin-bottom:0;"></div>
+          </div>
+
+          <div id="lookupResultsPanel" class="panel" style="display:none;">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title">Matching Devices</h2>
+                <span id="lookupResultsCount" class="pill neutral">0 matches</span>
+              </div>
+              <span class="meta-text" id="lookupResultsHint">Click any row to inspect live RSSI, radio details &amp; connection history</span>
+            </div>
+            <div class="table-wrap" style="max-height:320px;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Device / MAC</th>
+                    <th>Username</th>
+                    <th>IP / VLAN</th>
+                    <th>SSID / Band</th>
+                    <th>Site &amp; AP</th>
+                    <th>RSSI / Signal</th>
+                    <th>Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody id="lookupResultsBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="lookupDetailSection" style="display:none;">
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-actions">
+                  <h2 class="panel-title" id="detailClientTitle">Client Details</h2>
+                  <span id="detailOnlinePill" class="pill neutral">--</span>
+                </div>
+                <div class="panel-actions">
+                  <button id="detailRefreshBtn" class="btn-secondary" onclick="refreshSelectedClientDetail()">Refresh Client</button>
+                  <button id="exportClientEventsBtn" class="btn-secondary" onclick="exportClientEventsCsv()">Export Events CSV</button>
+                </div>
+              </div>
+
+              <section class="kpi-grid" style="margin-bottom:16px;">
+                <div class="kpi-card">
+                  <div class="kpi-label">Signal Strength (RSSI)</div>
+                  <div class="kpi-value" id="detailKpiRssi">--</div>
+                  <div class="kpi-sub" id="detailKpiRssiSub">--</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-label">Radio &amp; Protocol</div>
+                  <div class="kpi-value" id="detailKpiRadio" style="font-size:1.55rem;line-height:1.25;">--</div>
+                  <div class="kpi-sub" id="detailKpiRadioSub">--</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-label">Link Rates &amp; Traffic</div>
+                  <div class="kpi-value" id="detailKpiRates" style="font-size:1.45rem;line-height:1.25;">--</div>
+                  <div class="kpi-sub" id="detailKpiRatesSub">--</div>
+                </div>
+                <div class="kpi-card">
+                  <div class="kpi-label">AP &amp; Network</div>
+                  <div class="kpi-value" id="detailKpiAp" style="font-size:1.35rem;line-height:1.25;">--</div>
+                  <div class="kpi-sub" id="detailKpiApSub">--</div>
+                </div>
+              </section>
+
+              <div id="detailMetaGrid" class="detail-meta-grid"></div>
+
+              <div id="detailRssiChartPanel" style="display:none;margin-bottom:20px;">
+                <div class="panel-header" style="margin-bottom:8px;">
+                  <h3 class="panel-title" style="font-size:0.95rem;">RSSI Signal History (dBm)</h3>
+                  <span class="meta-text" id="detailRssiChartMeta">--</span>
+                </div>
+                <div class="chart-wrap" style="height:200px;">
+                  <canvas id="clientRssiChart"></canvas>
+                </div>
+              </div>
+
+              <div class="panel-header" style="margin-top:8px;">
+                <div class="panel-actions">
+                  <h3 class="panel-title">Connection &amp; Roam Events</h3>
+                  <span id="detailEventsBadge" class="pill neutral">0 Events</span>
+                </div>
+                <div class="filter-group">
+                  <button class="filter-btn active" data-ev-cat="all" onclick="setLookupEventFilter('all')">All</button>
+                  <button class="filter-btn" data-ev-cat="issue" onclick="setLookupEventFilter('issue')">Issues / Disconnects</button>
+                  <button class="filter-btn" data-ev-cat="connect" onclick="setLookupEventFilter('connect')">Connects / Roams</button>
+                </div>
+              </div>
+              <div class="table-wrap" style="max-height:380px;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Time</th>
+                      <th>Event</th>
+                      <th>Site</th>
+                      <th>AP</th>
+                      <th>SSID</th>
+                      <th>Band / Ch</th>
+                      <th>RSSI</th>
+                      <th>Details</th>
+                    </tr>
+                  </thead>
+                  <tbody id="detailEventsBody"></tbody>
+                </table>
+              </div>
+
+              <div id="detailSessionsWrap" style="display:none;margin-top:20px;">
+                <div class="panel-header">
+                  <div class="panel-actions">
+                    <h3 class="panel-title">Past Wi-Fi Sessions</h3>
+                    <span id="detailSessionsBadge" class="pill neutral">0 Sessions</span>
+                  </div>
+                </div>
+                <div class="table-wrap" style="max-height:300px;">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Session Time</th>
+                        <th>Duration</th>
+                        <th>Site</th>
+                        <th>AP</th>
+                        <th>SSID</th>
+                        <th>Band</th>
+                        <th>IP</th>
+                        <th>Disconnect Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody id="detailSessionsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </main>
     </div>
   </div>
@@ -563,9 +746,10 @@
       { id: "tab-nac-rejects", label: "NAC Server Rejects", countId: "navNacRejectsCount" },
       { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
     ];
-    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, countdown = 60, devicesDownTypeFilter = "all";
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, clientRssiChart = null, countdown = 60, devicesDownTypeFilter = "all";
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
     let nacState = { duration: "24h", profile: "all", data: null, loading: false };
+    let lookupState = { duration: "7d", results: null, selectedMac: null, selectedSiteId: null, detail: null, eventFilter: "all" };
     let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
     try {
       const savedWb = parseInt(localStorage.getItem("mist_wb_interval") || "", 10);
@@ -642,6 +826,12 @@
         } else {
           loadNacRejects(false);
         }
+      } else if (tabId === "tab-client-lookup") {
+        setTimeout(() => {
+          const inp = document.getElementById("clientLookupQuery");
+          if (inp && !lookupState.results) inp.focus();
+          if (lookupState.detail) renderClientRssiChart(lookupState.detail);
+        }, 40);
       }
     }
     function jumpWallboardTab(tabId) {
@@ -1603,6 +1793,392 @@
           d.nacrule_name ?? "",
           d.reason ?? "",
           typeof d.timestamp === "number" && d.timestamp > 0 ? new Date(d.timestamp * 1000).toISOString() : ""
+        ])
+      );
+    }
+
+    function fmtBytes(bytes) {
+      if (typeof bytes !== "number" || bytes < 0) return "--";
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+      if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`;
+      return `${(bytes / 1073741824).toFixed(2)} GB`;
+    }
+    function fmtDurationSec(sec) {
+      if (typeof sec !== "number" || sec < 0) return "--";
+      if (sec < 60) return `${Math.round(sec)}s`;
+      const mins = Math.floor(sec / 60);
+      if (mins < 60) return `${mins}m ${Math.round(sec % 60)}s`;
+      const hrs = Math.floor(mins / 60);
+      const remM = mins % 60;
+      if (hrs < 24) return remM ? `${hrs}h ${remM}m` : `${hrs}h`;
+      const days = Math.floor(hrs / 24);
+      const remH = hrs % 24;
+      return remH ? `${days}d ${remH}h` : `${days}d`;
+    }
+    function renderRssiBadge(rssi, quality) {
+      if (typeof rssi !== "number") return `<span class="meta-text">--</span>`;
+      const q = quality || (rssi >= -60 ? { label: "Excellent", tone: "ok" } : rssi >= -70 ? { label: "Good", tone: "ok" } : rssi >= -79 ? { label: "Fair", tone: "warn" } : { label: "Poor", tone: "bad" });
+      const activeBars = rssi >= -60 ? 4 : rssi >= -70 ? 3 : rssi >= -79 ? 2 : 1;
+      const barCls = q.tone === "ok" ? "on-ok" : q.tone === "warn" ? "on-warn" : "on-bad";
+      const heights = [4, 7, 10, 12];
+      const bars = heights.map((h, i) => `<span style="height:${h}px" class="${i < activeBars ? barCls : ""}"></span>`).join("");
+      return `<span class="rssi-bars">${bars}</span><span class="pill ${escapeHtml(q.tone)}">${escapeHtml(rssi)} dBm · ${escapeHtml(q.label)}</span>`;
+    }
+    function showLookupError(msg) {
+      const box = document.getElementById("lookupErrorBox");
+      if (!box) return;
+      if (!msg) {
+        box.style.display = "none";
+        box.textContent = "";
+      } else {
+        box.textContent = msg;
+        box.style.display = "block";
+      }
+    }
+    function setLookupDuration(dur) {
+      lookupState.duration = dur || "7d";
+      document.querySelectorAll("[data-lookup-dur]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.lookupDur === lookupState.duration)
+      );
+      const q = (document.getElementById("clientLookupQuery")?.value || "").trim();
+      if (q.length >= 2) {
+        runClientLookup();
+      } else if (lookupState.selectedMac) {
+        loadClientDetail(lookupState.selectedMac, lookupState.selectedSiteId);
+      }
+    }
+    function clearClientLookup() {
+      showLookupError("");
+      const inp = document.getElementById("clientLookupQuery");
+      if (inp) { inp.value = ""; inp.focus(); }
+      lookupState.results = null;
+      lookupState.selectedMac = null;
+      lookupState.selectedSiteId = null;
+      lookupState.detail = null;
+      document.getElementById("lookupResultsPanel").style.display = "none";
+      document.getElementById("lookupDetailSection").style.display = "none";
+      const badge = document.getElementById("lookupStatusBadge");
+      if (badge) { badge.textContent = "Ready"; badge.className = "pill neutral"; }
+    }
+    function handleClientLookupSubmit(ev) {
+      ev.preventDefault();
+      runClientLookup();
+    }
+    async function runClientLookup() {
+      const q = (document.getElementById("clientLookupQuery")?.value || "").trim();
+      const mode = document.getElementById("clientLookupMode")?.value || "auto";
+      showLookupError("");
+      if (q.length < 2) {
+        showLookupError("Enter at least 2 characters (MAC address, IP, username, or hostname).");
+        return;
+      }
+      const btn = document.getElementById("clientLookupBtn");
+      const badge = document.getElementById("lookupStatusBadge");
+      if (btn) { btn.disabled = true; btn.textContent = "Searching..."; }
+      if (badge) { badge.textContent = "Searching Mist..."; badge.className = "pill neutral"; }
+      try {
+        const qs = new URLSearchParams({ q, mode, duration: lookupState.duration });
+        const res = await fetch(`/api/client-lookup/search?${qs.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || data.login_required) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        renderLookupResults(data);
+      } catch (err) {
+        showLookupError(err.message);
+        if (badge) { badge.textContent = "Error"; badge.className = "pill bad"; }
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "Search Wi-Fi"; }
+      }
+    }
+    function renderLookupResults(data) {
+      lookupState.results = data;
+      const clients = data.clients || [];
+      const panel = document.getElementById("lookupResultsPanel");
+      const tbody = document.getElementById("lookupResultsBody");
+      const countBadge = document.getElementById("lookupResultsCount");
+      const statusBadge = document.getElementById("lookupStatusBadge");
+
+      panel.style.display = "block";
+      countBadge.textContent = `${fmtNum(clients.length)} match${clients.length === 1 ? "" : "es"}`;
+      countBadge.className = `pill ${clients.length ? "ok" : "warn"}`;
+      statusBadge.textContent = `${data.detected_mode.toUpperCase()} · Last ${data.duration}`;
+      statusBadge.className = "pill type-ap";
+
+      if (!clients.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="empty">No Wi-Fi clients matched "${escapeHtml(data.query)}" in the last ${escapeHtml(data.duration)}. Try a wider timeframe (e.g. 30d).</td></tr>`;
+        document.getElementById("lookupDetailSection").style.display = "none";
+        return;
+      }
+
+      tbody.innerHTML = clients.map(c => {
+        const isSel = lookupState.selectedMac === c.mac;
+        const statusPill = c.online
+          ? `<span class="pill ok">Online (Live)</span>`
+          : `<span class="pill neutral">Offline</span>`;
+        const devTitle = c.hostname ? `${escapeHtml(c.hostname)}<span class="sub-cell"><code>${escapeHtml(c.mac)}</code></span>` : `<code>${escapeHtml(c.mac)}</code>`;
+        const devMeta = [c.manufacture, c.model || c.family, c.os].filter(Boolean).join(" · ");
+        const devCell = devMeta ? `${devTitle}<span class="sub-cell">${escapeHtml(devMeta)}</span>` : devTitle;
+        const ipCell = `${escapeHtml(c.ip || "--")}${c.vlan !== null && c.vlan !== undefined ? `<span class="sub-cell">VLAN ${escapeHtml(c.vlan)}</span>` : ""}`;
+        const ssidCell = `${escapeHtml(c.ssid || "--")}${c.band ? `<span class="sub-cell">${escapeHtml(c.band)}${c.proto ? " · " + escapeHtml(c.proto) : ""}</span>` : ""}`;
+        const locCell = `${escapeHtml(c.site_name || "--")}${c.ap_name ? `<span class="sub-cell">${escapeHtml(c.ap_name)}</span>` : ""}`;
+        const ls = fmtLastSeen(c.last_seen);
+        const lsCell = ls.rel ? `${escapeHtml(ls.rel)}<span class="sub-cell">${escapeHtml(ls.label)}</span>` : escapeHtml(ls.label);
+        return `<tr class="clickable-row ${isSel ? "selected-row" : ""}" onclick="loadClientDetail('${escapeHtml(c.mac)}', '${escapeHtml(c.site_id || "")}')">
+          <td>${statusPill}</td>
+          <td>${devCell}</td>
+          <td>${escapeHtml(c.username || "--")}</td>
+          <td>${ipCell}</td>
+          <td>${ssidCell}</td>
+          <td>${locCell}</td>
+          <td>${renderRssiBadge(c.rssi, c.signal_quality)}</td>
+          <td>${lsCell}</td>
+        </tr>`;
+      }).join("");
+
+      if (clients.length === 1) {
+        loadClientDetail(clients[0].mac, clients[0].site_id || "");
+      }
+    }
+    async function loadClientDetail(mac, siteId) {
+      lookupState.selectedMac = mac;
+      lookupState.selectedSiteId = siteId || "";
+      if (lookupState.results) {
+        document.querySelectorAll("#lookupResultsBody tr").forEach(tr => tr.classList.remove("selected-row"));
+        const idx = (lookupState.results.clients || []).findIndex(c => c.mac === mac);
+        if (idx >= 0) {
+          const row = document.querySelectorAll("#lookupResultsBody tr")[idx];
+          if (row) row.classList.add("selected-row");
+        }
+      }
+      const section = document.getElementById("lookupDetailSection");
+      const refreshBtn = document.getElementById("detailRefreshBtn");
+      section.style.display = "block";
+      document.getElementById("detailClientTitle").textContent = `Loading ${mac}...`;
+      if (refreshBtn) refreshBtn.disabled = true;
+      showLookupError("");
+
+      try {
+        const qs = new URLSearchParams({ mac, duration: lookupState.duration });
+        if (siteId) qs.set("site_id", siteId);
+        const res = await fetch(`/api/client-lookup/detail?${qs.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || data.login_required) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        renderClientDetail(data);
+      } catch (err) {
+        showLookupError(err.message);
+      } finally {
+        if (refreshBtn) refreshBtn.disabled = false;
+      }
+    }
+    function refreshSelectedClientDetail() {
+      if (lookupState.selectedMac) {
+        loadClientDetail(lookupState.selectedMac, lookupState.selectedSiteId);
+      }
+    }
+    function setLookupEventFilter(cat) {
+      lookupState.eventFilter = cat || "all";
+      document.querySelectorAll("[data-ev-cat]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.evCat === lookupState.eventFilter)
+      );
+      renderClientEventsTable();
+    }
+    function renderClientRssiChart(data) {
+      const series = data?.rssi_series || [];
+      const panel = document.getElementById("detailRssiChartPanel");
+      if (!series.length) {
+        if (clientRssiChart) { clientRssiChart.destroy(); clientRssiChart = null; }
+        panel.style.display = "none";
+        return;
+      }
+      panel.style.display = "block";
+      const minR = Math.min(...series.map(p => p.rssi));
+      const maxR = Math.max(...series.map(p => p.rssi));
+      document.getElementById("detailRssiChartMeta").textContent = `${series.length} readings · range ${minR} dBm to ${maxR} dBm`;
+
+      if (clientRssiChart) clientRssiChart.destroy();
+      clientRssiChart = new Chart(document.getElementById("clientRssiChart"), {
+        type: "line",
+        data: {
+          labels: series.map(p => new Date(p.timestamp * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })),
+          datasets: [{
+            label: "RSSI (dBm)",
+            data: series.map(p => p.rssi),
+            borderColor: "#38bdf8",
+            backgroundColor: "rgba(56, 189, 248, 0.14)",
+            borderWidth: 2.2,
+            fill: true,
+            tension: 0.25,
+            pointRadius: series.length <= 40 ? 4 : 2,
+            pointBackgroundColor: series.map(p => p.rssi >= -70 ? "#34d399" : p.rssi >= -79 ? "#fbbf24" : "#f87171")
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            x: { ticks: { color: "#94a3b8", maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }, grid: { display: false } },
+            y: { suggestedMin: -90, suggestedMax: -35, ticks: { color: "#94a3b8", callback: v => `${v} dBm` }, grid: { color: "#1e293b" } }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const pt = series[ctx.dataIndex];
+                  return `RSSI: ${pt.rssi} dBm · ${pt.ap_name} (${pt.type})`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+    function renderClientEventsTable() {
+      const tbody = document.getElementById("detailEventsBody");
+      const badge = document.getElementById("detailEventsBadge");
+      const allEvents = lookupState.detail?.events || [];
+      const filtered = lookupState.eventFilter === "all"
+        ? allEvents
+        : allEvents.filter(e => e.category === lookupState.eventFilter);
+
+      badge.textContent = filtered.length === allEvents.length
+        ? `${fmtNum(allEvents.length)} Event${allEvents.length === 1 ? "" : "s"}`
+        : `${fmtNum(filtered.length)} of ${fmtNum(allEvents.length)} Events`;
+      badge.className = `pill ${allEvents.some(e => e.category === "issue") ? "warn" : "neutral"}`;
+
+      if (!filtered.length) {
+        tbody.innerHTML = `<tr><td colspan="8" class="empty">No connection events found for this filter in the last ${escapeHtml(lookupState.duration)}.</td></tr>`;
+        return;
+      }
+
+      tbody.innerHTML = filtered.map(e => {
+        const ts = e.timestamp ? new Date(e.timestamp * 1000).toLocaleString() : "--";
+        const pillCls = e.category === "issue" ? "bad" : e.category === "connect" ? "ok" : "neutral";
+        const radio = [e.band, e.channel ? `Ch ${e.channel}` : ""].filter(Boolean).join(" · ") || "--";
+        const details = [e.reason_code !== null && e.reason_code !== undefined ? `Reason ${e.reason_code}` : "", e.text].filter(Boolean).join(" — ") || "--";
+        return `<tr>
+          <td>${escapeHtml(ts)}</td>
+          <td><span class="pill ${pillCls}">${escapeHtml(e.type)}</span></td>
+          <td>${escapeHtml(e.site_name)}</td>
+          <td>${escapeHtml(e.ap_name)}</td>
+          <td>${escapeHtml(e.ssid || "--")}</td>
+          <td>${escapeHtml(radio)}</td>
+          <td>${typeof e.rssi === "number" ? renderRssiBadge(e.rssi) : '<span class="meta-text">--</span>'}</td>
+          <td style="white-space:normal;min-width:180px;">${escapeHtml(details)}</td>
+        </tr>`;
+      }).join("");
+    }
+    function renderClientDetail(data) {
+      lookupState.detail = data;
+      const p = data.profile || {};
+      const titleParts = [p.hostname || p.mac];
+      if (p.hostname && p.mac) titleParts.push(`(${p.mac})`);
+      document.getElementById("detailClientTitle").textContent = titleParts.join(" ");
+
+      const onlinePill = document.getElementById("detailOnlinePill");
+      onlinePill.textContent = p.online ? "Online (Live Telemetry)" : `Offline · Last seen ${fmtLastSeen(p.last_seen).rel || "earlier"}`;
+      onlinePill.className = `pill ${p.online ? "ok" : "neutral"}`;
+
+      // KPI 1: RSSI & Signal
+      const rssiVal = document.getElementById("detailKpiRssi");
+      rssiVal.textContent = typeof p.rssi === "number" ? `${p.rssi} dBm` : "--";
+      rssiVal.style.color = p.signal_quality?.tone === "ok" ? "var(--green)" : p.signal_quality?.tone === "warn" ? "var(--amber)" : p.signal_quality?.tone === "bad" ? "var(--red)" : "var(--text)";
+      const rssiSub = [];
+      if (p.signal_quality?.label && p.signal_quality.label !== "Unknown") rssiSub.push(p.signal_quality.label);
+      if (typeof p.snr === "number") rssiSub.push(`SNR ${p.snr} dB`);
+      if (!p.online && typeof p.rssi === "number") rssiSub.push("Last recorded");
+      document.getElementById("detailKpiRssiSub").textContent = rssiSub.join(" · ") || "No signal reading";
+
+      // KPI 2: Radio & Protocol
+      const radioParts = [p.band, p.channel ? `Ch ${p.channel}` : ""].filter(Boolean);
+      const widthTxt = p.channel_width ? ` (${p.channel_width} MHz)` : "";
+      document.getElementById("detailKpiRadio").textContent = radioParts.length ? `${radioParts.join(" · ")}${widthTxt}` : "--";
+      document.getElementById("detailKpiRadioSub").textContent = [p.proto, p.key_mgmt].filter(Boolean).join(" · ") || "Wi-Fi radio info";
+
+      // KPI 3: Link Rates & Traffic
+      const rateTxt = (typeof p.tx_rate === "number" || typeof p.rx_rate === "number")
+        ? `TX ${p.tx_rate ?? "--"} / RX ${p.rx_rate ?? "--"} Mbps`
+        : (p.online ? "Connected" : "Offline");
+      document.getElementById("detailKpiRates").textContent = rateTxt;
+      const trafficParts = [];
+      if (typeof p.tx_bytes === "number" || typeof p.rx_bytes === "number") {
+        trafficParts.push(`↑ ${fmtBytes(p.tx_bytes)} · ↓ ${fmtBytes(p.rx_bytes)}`);
+      }
+      if (typeof p.tx_retry_pct === "number") trafficParts.push(`TX retry ${p.tx_retry_pct}%`);
+      if (typeof p.uptime === "number") trafficParts.push(`Uptime ${fmtDurationSec(p.uptime)}`);
+      document.getElementById("detailKpiRatesSub").textContent = trafficParts.join(" · ") || "Live rates available when online";
+
+      // KPI 4: AP & Network
+      document.getElementById("detailKpiAp").textContent = p.ap_name || "--";
+      const apSub = [p.site_name, p.ssid, p.vlan !== null && p.vlan !== undefined ? `VLAN ${p.vlan}` : ""].filter(Boolean);
+      document.getElementById("detailKpiApSub").textContent = apSub.join(" · ") || "--";
+
+      // Metadata Grid
+      const chips = [
+        ["Username", p.username || "--"],
+        ["MAC Address", p.mac || "--"],
+        ["IP Address", p.ip || "--"],
+        ["SSID", p.ssid || "--"],
+        ["Manufacturer", p.manufacture || "--"],
+        ["Device / Model", [p.family, p.model].filter(Boolean).join(" · ") || "--"],
+        ["OS", p.os || "--"],
+        ["Sites Seen", (p.seen_sites && p.seen_sites.length) ? p.seen_sites.join(", ") : (p.site_name || "--")]
+      ];
+      document.getElementById("detailMetaGrid").innerHTML = chips.map(([lbl, val]) =>
+        `<div class="detail-chip"><div class="detail-chip-label">${escapeHtml(lbl)}</div><div class="detail-chip-val">${escapeHtml(val)}</div></div>`
+      ).join("");
+
+      renderClientRssiChart(data);
+      renderClientEventsTable();
+
+      // Past sessions
+      const sessions = data.sessions || [];
+      const sessWrap = document.getElementById("detailSessionsWrap");
+      if (sessions.length) {
+        sessWrap.style.display = "block";
+        document.getElementById("detailSessionsBadge").textContent = `${fmtNum(sessions.length)} Session${sessions.length === 1 ? "" : "s"}`;
+        document.getElementById("detailSessionsBody").innerHTML = sessions.map(s => `<tr>
+          <td>${s.timestamp ? escapeHtml(new Date(s.timestamp * 1000).toLocaleString()) : "--"}</td>
+          <td>${escapeHtml(fmtDurationSec(s.duration))}</td>
+          <td>${escapeHtml(s.site_name)}</td>
+          <td>${escapeHtml(s.ap_name)}</td>
+          <td>${escapeHtml(s.ssid || "--")}</td>
+          <td>${escapeHtml(s.band || "--")}</td>
+          <td>${escapeHtml(s.ip || "--")}</td>
+          <td>${escapeHtml(s.disconnect_reason || "--")}</td>
+        </tr>`).join("");
+      } else {
+        sessWrap.style.display = "none";
+      }
+    }
+    function exportClientEventsCsv() {
+      const d = lookupState.detail;
+      const events = d?.events || [];
+      if (!events.length) return;
+      const macSlug = (d.profile?.mac || "client").replace(/:/g, "");
+      downloadCsv(
+        `mist-client-${macSlug}-events-${lookupState.duration}.csv`,
+        ["Timestamp", "Event Type", "Category", "Site", "AP", "SSID", "Band", "Channel", "RSSI (dBm)", "Reason Code", "Details"],
+        events.map(e => [
+          e.timestamp ? new Date(e.timestamp * 1000).toISOString() : "",
+          e.type ?? "",
+          e.category ?? "",
+          e.site_name ?? "",
+          e.ap_name ?? "",
+          e.ssid ?? "",
+          e.band ?? "",
+          e.channel ?? "",
+          e.rssi ?? "",
+          e.reason_code ?? "",
+          e.text ?? ""
         ])
       );
     }

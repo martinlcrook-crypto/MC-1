@@ -13,6 +13,7 @@ import requests
 from history_store import init_history_db, query_history, record_snapshot
 from nac_rejects import collect_nac_server_rejects
 from client_lookup import get_wifi_client_detail, search_wifi_clients
+from traffic_stats import collect_traffic_usage
 
 
 def load_dotenv(path: Path) -> None:
@@ -1280,6 +1281,90 @@ def api_client_lookup_detail():
 
     data["fetched_at"] = datetime.now(timezone.utc).isoformat()
     resp = jsonify(data)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+_traffic_cache_lock = threading.Lock()
+_traffic_cache: Dict[Tuple[int, str], Tuple[float, Dict[str, Any]]] = {}
+TRAFFIC_CACHE_TTL_SECONDS = int(os.getenv("TRAFFIC_CACHE_TTL_SECONDS", "300"))
+
+
+def _cached_prioritized_site_ids() -> List[str]:
+    ordered: List[str] = []
+    with _cache_lock:
+        if isinstance(_cache_data, dict):
+            for s in _cache_data.get("sites") or []:
+                if isinstance(s, dict) and s.get("id"):
+                    ordered.append(str(s["id"]))
+    return ordered
+
+
+@app.get("/api/traffic")
+def api_traffic():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    days_raw = (request.args.get("days") or "5").strip()
+    try:
+        days = int(days_raw)
+    except ValueError:
+        days = 5
+    if days not in (1, 5, 7):
+        days = 5
+
+    site_id = (request.args.get("site_id") or "all").strip() or "all"
+    force_refresh = request.args.get("refresh") == "1"
+    cache_key = (days, site_id)
+    now = time.time()
+
+    with _traffic_cache_lock:
+        cached_entry = _traffic_cache.get(cache_key)
+        if cached_entry is not None:
+            cached_ts, cached_payload = cached_entry
+            age = now - cached_ts
+            if (not force_refresh and age < TRAFFIC_CACHE_TTL_SECONDS) or (
+                force_refresh and age < MIN_REFRESH_INTERVAL
+            ):
+                out = dict(cached_payload)
+                out["cached"] = True
+                out["cache_age_seconds"] = int(age)
+                resp = jsonify(out)
+                resp.headers["Cache-Control"] = "no-store"
+                return resp
+
+    session = requests.Session()
+    session.headers.update({"Authorization": f"Token {MIST_API_TOKEN}", "Accept": "application/json"})
+    try:
+        fresh = collect_traffic_usage(
+            session=session,
+            api_host=MIST_API_HOST,
+            org_id=MIST_ORG_ID,
+            days=days,
+            site_id=site_id,
+            site_name_map=_cached_site_name_map(),
+            prioritized_site_ids=_cached_prioritized_site_ids(),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
+    except Exception as exc:
+        return jsonify({"error": f"Failed to query Mist traffic usage: {exc}"}), 502
+    finally:
+        session.close()
+
+    fresh["fetched_at"] = datetime.now(timezone.utc).isoformat()
+    with _traffic_cache_lock:
+        _traffic_cache[cache_key] = (time.time(), fresh)
+
+    out = dict(fresh)
+    out["cached"] = False
+    out["cache_age_seconds"] = 0
+    resp = jsonify(out)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

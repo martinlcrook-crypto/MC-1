@@ -145,10 +145,13 @@
     .hist-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
     .hist-empty { display: none; text-align: center; padding: 64px 20px; color: var(--muted); font-size: 0.92rem; }
     body.wallboard-mode .hist-controls,
+    body.wallboard-mode .traffic-controls,
     body.wallboard-mode .nac-controls,
     body.wallboard-mode #exportHistoryBtn,
+    body.wallboard-mode #exportTrafficBtn,
     body.wallboard-mode #exportNacRejectsBtn { display: none !important; }
     body.wallboard-mode #tab-history .kpi-grid,
+    body.wallboard-mode #tab-traffic .kpi-grid,
     body.wallboard-mode #tab-nac-rejects .kpi-grid { grid-template-columns: repeat(4, 1fr); }
 
     /* Wi-Fi Client Lookup Tab */
@@ -219,6 +222,10 @@
         <button class="nav-tab" data-tab="tab-history" onclick="switchTab('tab-history')">
           <span>Wi-Fi History &amp; Peaks</span>
           <span id="navHistoryPeak" class="pill neutral">--</span>
+        </button>
+        <button class="nav-tab" data-tab="tab-traffic" onclick="switchTab('tab-traffic')">
+          <span>Traffic Usage</span>
+          <span id="navTrafficTotal" class="pill neutral">5d</span>
         </button>
         <button class="nav-tab" data-tab="tab-sites" onclick="switchTab('tab-sites')">
           <span>All Site Breakdown</span>
@@ -424,6 +431,94 @@
             <div class="hist-footer">
               <span id="histDrillHint">Select Week, Month, Year, or All Time and click any point to drill down.</span>
               <span id="histCoverageMeta">Loading history metadata...</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 3B: TRAFFIC USAGE (5 DAYS) -->
+        <div id="tab-traffic" class="tab-pane">
+          <section class="kpi-grid">
+            <div class="kpi-card kpi-wireless">
+              <div class="kpi-label" id="kpiTrafficTotalLabel">Total Traffic (Last 5 Days)</div>
+              <div class="kpi-value" id="kpiTrafficTotal">--</div>
+              <div class="kpi-sub" id="kpiTrafficTotalSub">Loading Mist traffic metrics...</div>
+            </div>
+            <div class="kpi-card kpi-eduroam">
+              <div class="kpi-label">Peak Hourly Throughput</div>
+              <div class="kpi-value" id="kpiTrafficPeak">--</div>
+              <div class="kpi-sub" id="kpiTrafficPeakSub">--</div>
+            </div>
+            <div class="kpi-card kpi-connect">
+              <div class="kpi-label">Average Throughput</div>
+              <div class="kpi-value" id="kpiTrafficAvg">--</div>
+              <div class="kpi-sub" id="kpiTrafficAvgSub">Sustained period average</div>
+            </div>
+            <div class="kpi-card kpi-aps">
+              <div class="kpi-label">Busiest Day</div>
+              <div class="kpi-value" id="kpiTrafficBusiestDay">--</div>
+              <div class="kpi-sub" id="kpiTrafficBusiestDaySub">--</div>
+            </div>
+          </section>
+
+          <div class="panel">
+            <div class="hist-toolbar">
+              <div class="panel-actions">
+                <h2 class="panel-title" id="trafficChartTitle">Network Traffic Usage — Last 5 Days</h2>
+                <span id="trafficScopeBadge" class="pill neutral">All Sites (Org Total)</span>
+              </div>
+              <div class="panel-actions traffic-controls">
+                <div class="filter-group">
+                  <button class="filter-btn" data-traffic-days="1" onclick="setTrafficDays(1)">24h</button>
+                  <button class="filter-btn active" data-traffic-days="5" onclick="setTrafficDays(5)">5 Days</button>
+                  <button class="filter-btn" data-traffic-days="7" onclick="setTrafficDays(7)">7 Days</button>
+                </div>
+                <div class="filter-group">
+                  <button class="filter-btn active" data-traffic-view="volume" onclick="setTrafficView('volume')">Volume (GB/hr)</button>
+                  <button class="filter-btn" data-traffic-view="throughput" onclick="setTrafficView('throughput')">Throughput (Mbps)</button>
+                  <button class="filter-btn" data-traffic-view="daily" onclick="setTrafficView('daily')">Daily Totals (GB)</button>
+                </div>
+                <select id="trafficSiteSelect" class="wb-select" title="Filter traffic by site" onchange="setTrafficSite(this.value)">
+                  <option value="all">All Sites (Org Total)</option>
+                </select>
+                <button id="refreshTrafficBtn" class="btn-secondary" onclick="loadTraffic(true)">Refresh</button>
+                <button id="exportTrafficBtn" class="btn-secondary" onclick="exportTrafficCsv()">Export CSV</button>
+              </div>
+            </div>
+
+            <div id="trafficStatusMsg" class="hist-empty" style="display:block;">Loading 5-day Mist traffic usage across sites...</div>
+            <div id="trafficChartWrap" class="chart-wrap-lg" style="display:none;">
+              <canvas id="trafficChart"></canvas>
+            </div>
+
+            <div class="hist-footer">
+              <span id="trafficMetaLeft">Source: Juniper Mist Insights (read-only)</span>
+              <span id="trafficMetaRight">--</span>
+            </div>
+          </div>
+
+          <div id="trafficSitesPanel" class="panel wallboard-hide" style="display:none;">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title" id="trafficSitesTitle">Top Sites by Traffic (Last 5 Days)</h2>
+                <span id="trafficSitesBadge" class="pill neutral">0 Sites</span>
+              </div>
+              <span class="meta-text">Click any site row to view its individual traffic chart</span>
+            </div>
+            <div class="table-wrap" style="max-height:420px;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Site</th>
+                    <th class="num">Total Traffic</th>
+                    <th class="num">TX (Down)</th>
+                    <th class="num">RX (Up)</th>
+                    <th class="num">Avg Throughput</th>
+                    <th class="num">Peak Hourly</th>
+                    <th class="num">Org Share</th>
+                  </tr>
+                </thead>
+                <tbody id="trafficSitesBody"></tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -736,13 +831,15 @@
       { id: "tab-home", label: "Homescreen", countId: "navUsersCount" },
       { id: "tab-devices-down", label: "Devices Down", countId: "navDevicesDownCount" },
       { id: "tab-history", label: "Wi-Fi History & Peaks", countId: "navHistoryPeak" },
+      { id: "tab-traffic", label: "Traffic Usage", countId: "navTrafficTotal" },
       { id: "tab-sites", label: "All Site Breakdown", countId: "navSitesCount" },
       { id: "tab-ap-issues", label: "APs < 1Gb", countId: "navApIssuesCount" },
       { id: "tab-nac-rejects", label: "NAC Server Rejects", countId: "navNacRejectsCount" },
       { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
     ];
-    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, clientRssiChart = null, countdown = 60, devicesDownTypeFilter = "all";
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, trafficChart = null, clientRssiChart = null, countdown = 60, devicesDownTypeFilter = "all";
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
+    let trafficState = { days: 5, siteId: "all", view: "volume", data: null, loading: false };
     let nacState = { duration: "24h", profile: "all", data: null, loading: false };
     let lookupState = { duration: "7d", results: null, selectedMac: null, selectedSiteId: null, detail: null, eventFilter: "all" };
     let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
@@ -814,6 +911,12 @@
           setTimeout(() => renderHistoryChart(histState.data), 30);
         } else {
           loadHistory();
+        }
+      } else if (tabId === "tab-traffic") {
+        if (trafficState.data) {
+          setTimeout(() => renderTrafficChart(trafficState.data), 30);
+        } else {
+          loadTraffic(false);
         }
       } else if (tabId === "tab-nac-rejects") {
         if (nacState.data) {
@@ -1572,6 +1675,438 @@
       );
     }
 
+    function fmtTrafficBytes(bytes) {
+      if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "--";
+      if (bytes === 0) return "0 B";
+      if (bytes < 1e3) return `${Math.round(bytes)} B`;
+      if (bytes < 1e6) return `${(bytes / 1e3).toFixed(1)} KB`;
+      if (bytes < 1e9) return `${(bytes / 1e6).toFixed(1)} MB`;
+      if (bytes < 1e12) return `${(bytes / 1e9).toFixed(2)} GB`;
+      return `${(bytes / 1e12).toFixed(2)} TB`;
+    }
+    function fmtMbps(mbps) {
+      if (typeof mbps !== "number" || !Number.isFinite(mbps) || mbps < 0) return "--";
+      if (mbps >= 1000) return `${(mbps / 1000).toFixed(2)} Gbps`;
+      if (mbps >= 100) return `${mbps.toFixed(0)} Mbps`;
+      return `${mbps.toFixed(1)} Mbps`;
+    }
+    function setTrafficDays(days) {
+      trafficState.days = days;
+      document.querySelectorAll("[data-traffic-days]").forEach(btn =>
+        btn.classList.toggle("active", Number(btn.dataset.trafficDays) === days)
+      );
+      loadTraffic(false);
+    }
+    function setTrafficView(view) {
+      trafficState.view = view;
+      document.querySelectorAll("[data-traffic-view]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.trafficView === view)
+      );
+      if (trafficState.data) renderTrafficChart(trafficState.data);
+    }
+    function setTrafficSite(siteId) {
+      trafficState.siteId = siteId || "all";
+      const sel = document.getElementById("trafficSiteSelect");
+      if (sel && sel.value !== trafficState.siteId) sel.value = trafficState.siteId;
+      loadTraffic(false);
+    }
+    function renderTrafficChart(data) {
+      if (typeof Chart === "undefined") return;
+      const statusEl = document.getElementById("trafficStatusMsg");
+      const wrapEl = document.getElementById("trafficChartWrap");
+      const view = trafficState.view || "volume";
+      const hasSplit = Boolean(data.has_rx_tx_split);
+      const hourly = data.hourly_points || [];
+      const daily = data.daily_points || [];
+      const points = view === "daily" ? daily : hourly;
+      const hasTraffic = (data.summary?.total_bytes || 0) > 0;
+
+      if (!points.length || !hasTraffic) {
+        if (trafficChart) { trafficChart.destroy(); trafficChart = null; }
+        wrapEl.style.display = "none";
+        statusEl.style.display = "block";
+        statusEl.textContent = (data.warnings && data.warnings.length)
+          ? `No traffic data returned: ${data.warnings.join(" | ")}`
+          : `No traffic usage recorded for ${data.site_name || "this selection"} in the ${data.duration_label || "selected period"}.`;
+        return;
+      }
+
+      statusEl.style.display = "none";
+      wrapEl.style.display = "block";
+
+      const labels = points.map(p => p.label);
+      let chartType = "line";
+      let datasets = [];
+      let yTitle = "";
+      let stacked = false;
+
+      if (view === "daily") {
+        chartType = "bar";
+        yTitle = "Daily Volume (GB)";
+        if (hasSplit) {
+          stacked = true;
+          datasets = [
+            {
+              label: "TX / Downstream (GB)",
+              data: daily.map(p => p.tx_gb ?? 0),
+              backgroundColor: "rgba(129, 140, 248, 0.85)",
+              borderRadius: 4
+            },
+            {
+              label: "RX / Upstream (GB)",
+              data: daily.map(p => p.rx_gb ?? 0),
+              backgroundColor: "rgba(45, 212, 191, 0.85)",
+              borderRadius: 4
+            }
+          ];
+        } else {
+          datasets = [
+            {
+              label: "Total Traffic (GB)",
+              data: daily.map(p => p.total_gb ?? 0),
+              backgroundColor: "rgba(56, 189, 248, 0.85)",
+              borderRadius: 6
+            }
+          ];
+        }
+      } else if (view === "throughput") {
+        chartType = "line";
+        yTitle = "Avg Throughput (Mbps)";
+        if (hasSplit) {
+          datasets = [
+            {
+              label: "Total Throughput (Mbps)",
+              data: hourly.map(p => p.avg_mbps ?? 0),
+              borderColor: "#38bdf8",
+              backgroundColor: "rgba(56, 189, 248, 0.14)",
+              fill: true,
+              tension: 0.28,
+              borderWidth: 2.5,
+              pointRadius: hourly.length <= 36 ? 3 : 0,
+              pointHoverRadius: 5
+            },
+            {
+              label: "TX / Downstream (Mbps)",
+              data: hourly.map(p => p.tx_mbps ?? 0),
+              borderColor: "#818cf8",
+              backgroundColor: "transparent",
+              fill: false,
+              tension: 0.28,
+              borderWidth: 1.8,
+              pointRadius: 0,
+              pointHoverRadius: 4
+            },
+            {
+              label: "RX / Upstream (Mbps)",
+              data: hourly.map(p => p.rx_mbps ?? 0),
+              borderColor: "#2dd4bf",
+              backgroundColor: "transparent",
+              fill: false,
+              tension: 0.28,
+              borderWidth: 1.8,
+              pointRadius: 0,
+              pointHoverRadius: 4
+            }
+          ];
+        } else {
+          datasets = [
+            {
+              label: "Average Throughput (Mbps)",
+              data: hourly.map(p => p.avg_mbps ?? 0),
+              borderColor: "#38bdf8",
+              backgroundColor: "rgba(56, 189, 248, 0.16)",
+              fill: true,
+              tension: 0.28,
+              borderWidth: 2.5,
+              pointRadius: hourly.length <= 36 ? 3 : 0,
+              pointHoverRadius: 5
+            }
+          ];
+        }
+      } else {
+        // Default: Hourly Volume (GB/hr)
+        chartType = "line";
+        yTitle = "Hourly Volume (GB)";
+        if (hasSplit) {
+          datasets = [
+            {
+              label: "Total Traffic (GB)",
+              data: hourly.map(p => p.total_gb ?? 0),
+              borderColor: "#38bdf8",
+              backgroundColor: "rgba(56, 189, 248, 0.14)",
+              fill: true,
+              tension: 0.28,
+              borderWidth: 2.5,
+              pointRadius: hourly.length <= 36 ? 3 : 0,
+              pointHoverRadius: 5
+            },
+            {
+              label: "TX / Downstream (GB)",
+              data: hourly.map(p => p.tx_gb ?? 0),
+              borderColor: "#818cf8",
+              backgroundColor: "transparent",
+              fill: false,
+              tension: 0.28,
+              borderWidth: 1.8,
+              pointRadius: 0,
+              pointHoverRadius: 4
+            },
+            {
+              label: "RX / Upstream (GB)",
+              data: hourly.map(p => p.rx_gb ?? 0),
+              borderColor: "#2dd4bf",
+              backgroundColor: "transparent",
+              fill: false,
+              tension: 0.28,
+              borderWidth: 1.8,
+              pointRadius: 0,
+              pointHoverRadius: 4
+            }
+          ];
+        } else {
+          datasets = [
+            {
+              label: "Hourly Traffic (GB)",
+              data: hourly.map(p => p.total_gb ?? 0),
+              borderColor: "#38bdf8",
+              backgroundColor: "rgba(56, 189, 248, 0.16)",
+              fill: true,
+              tension: 0.28,
+              borderWidth: 2.5,
+              pointRadius: hourly.length <= 36 ? 3 : 0,
+              pointHoverRadius: 5
+            }
+          ];
+        }
+      }
+
+      if (trafficChart) trafficChart.destroy();
+      trafficChart = new Chart(document.getElementById("trafficChart"), {
+        type: chartType,
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          scales: {
+            x: {
+              stacked,
+              ticks: { color: "#94a3b8", maxRotation: 0, autoSkip: true, maxTicksLimit: view === "daily" ? 8 : 12 },
+              grid: { display: false }
+            },
+            y: {
+              stacked,
+              beginAtZero: true,
+              title: { display: true, text: yTitle, color: "#94a3b8", font: { size: 11 } },
+              ticks: { color: "#94a3b8" },
+              grid: { color: "#1e293b" }
+            }
+          },
+          plugins: {
+            legend: { labels: { color: "#cbd5e1", boxWidth: 12, padding: 14 } },
+            tooltip: {
+              callbacks: {
+                title: items => {
+                  if (!items.length) return "";
+                  const p = points[items[0].dataIndex];
+                  const partial = p && p.is_partial_hour ? " (current hour)" : "";
+                  return (p ? p.full_label : items[0].label) + partial;
+                },
+                label: ctx => {
+                  const val = typeof ctx.parsed.y === "number" ? ctx.parsed.y : 0;
+                  if (view === "throughput") return `${ctx.dataset.label}: ${fmtMbps(val)}`;
+                  return `${ctx.dataset.label}: ${val >= 1000 ? (val / 1000).toFixed(2) + " TB" : val.toFixed(2) + " GB"}`;
+                },
+                footer: items => {
+                  if (!items.length) return "";
+                  const p = points[items[0].dataIndex];
+                  if (!p) return "";
+                  if (view === "daily") {
+                    return `Total: ${fmtTrafficBytes(p.total_bytes)} · Peak: ${fmtMbps(p.peak_mbps)} · Avg: ${fmtMbps(p.avg_mbps)}`;
+                  }
+                  if (view === "throughput") {
+                    return `Hour volume: ${fmtTrafficBytes(p.total_bytes)}`;
+                  }
+                  return `Hour avg throughput: ${fmtMbps(p.avg_mbps)}`;
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+    function renderTrafficSitesTable(data) {
+      const panel = document.getElementById("trafficSitesPanel");
+      const tbody = document.getElementById("trafficSitesBody");
+      const badge = document.getElementById("trafficSitesBadge");
+      const title = document.getElementById("trafficSitesTitle");
+      if (!panel || !tbody) return;
+
+      const sites = (data.top_sites || []).filter(s => s.total_bytes > 0);
+      if (data.site_id !== "all" || !sites.length) {
+        panel.style.display = "none";
+        return;
+      }
+
+      panel.style.display = "block";
+      title.textContent = `Top Sites by Traffic (${data.duration_label || "Last 5 Days"})`;
+      badge.textContent = `${fmtNum(sites.length)} Active Site${sites.length === 1 ? "" : "s"}`;
+      const hasSplit = Boolean(data.has_rx_tx_split);
+
+      tbody.innerHTML = sites.map(s => `<tr class="clickable-row" onclick="setTrafficSite('${escapeHtml(s.site_id)}')">
+        <td><strong>${escapeHtml(s.site_name)}</strong></td>
+        <td class="num"><strong>${escapeHtml(fmtTrafficBytes(s.total_bytes))}</strong></td>
+        <td class="num" style="color:var(--eduroam);">${hasSplit ? escapeHtml(fmtTrafficBytes(s.tx_bytes)) : "--"}</td>
+        <td class="num" style="color:var(--connect);">${hasSplit ? escapeHtml(fmtTrafficBytes(s.rx_bytes)) : "--"}</td>
+        <td class="num">${escapeHtml(fmtMbps(s.avg_mbps))}</td>
+        <td class="num">${escapeHtml(fmtMbps(s.peak_mbps))}</td>
+        <td class="num"><span class="pill neutral">${s.share_pct ?? 0}%</span></td>
+      </tr>`).join("");
+    }
+    function renderTraffic(data) {
+      trafficState.data = data;
+      const sum = data.summary || {};
+      const durLabel = data.duration_label || "Last 5 Days";
+      const hasSplit = Boolean(data.has_rx_tx_split);
+
+      document.querySelectorAll("[data-traffic-days]").forEach(btn =>
+        btn.classList.toggle("active", Number(btn.dataset.trafficDays) === data.days)
+      );
+
+      document.getElementById("kpiTrafficTotalLabel").textContent = `Total Traffic (${durLabel})`;
+      document.getElementById("kpiTrafficTotal").textContent = fmtTrafficBytes(sum.total_bytes);
+      document.getElementById("kpiTrafficTotalSub").textContent = hasSplit
+        ? `TX (Down) ${fmtTrafficBytes(sum.tx_bytes)} · RX (Up) ${fmtTrafficBytes(sum.rx_bytes)}`
+        : `${fmtNum(data.sites_with_data ?? 0)} of ${fmtNum(data.sites_queried ?? 0)} sites with traffic`;
+
+      document.getElementById("kpiTrafficPeak").textContent = fmtMbps(sum.peak_mbps);
+      document.getElementById("kpiTrafficPeakSub").textContent = sum.peak_short_time
+        ? `Peak hour: ${sum.peak_short_time} (${fmtTrafficBytes(sum.peak_hour_bytes)})`
+        : "No peak recorded";
+
+      document.getElementById("kpiTrafficAvg").textContent = fmtMbps(sum.avg_mbps);
+      document.getElementById("kpiTrafficAvgSub").textContent = hasSplit
+        ? `TX ${fmtMbps(sum.avg_tx_mbps)} · RX ${fmtMbps(sum.avg_rx_mbps)}`
+        : `Sustained avg across ${durLabel.toLowerCase()}`;
+
+      if (sum.busiest_day) {
+        document.getElementById("kpiTrafficBusiestDay").textContent = fmtTrafficBytes(sum.busiest_day.total_bytes);
+        const siteNote = (data.site_id === "all" && sum.busiest_site)
+          ? ` · Top site: ${sum.busiest_site.site_name} (${sum.busiest_site.share_pct}%)`
+          : "";
+        document.getElementById("kpiTrafficBusiestDaySub").textContent = `${sum.busiest_day.label}${siteNote}`;
+      } else {
+        document.getElementById("kpiTrafficBusiestDay").textContent = "--";
+        document.getElementById("kpiTrafficBusiestDaySub").textContent = "No traffic recorded";
+      }
+
+      const navBadge = document.getElementById("navTrafficTotal");
+      if (navBadge) {
+        navBadge.textContent = sum.total_bytes > 0 ? fmtTrafficBytes(sum.total_bytes) : "5d";
+        navBadge.className = "pill neutral";
+      }
+
+      document.getElementById("trafficChartTitle").textContent = `Network Traffic Usage — ${durLabel}`;
+      document.getElementById("trafficScopeBadge").textContent = data.site_name || "All Sites (Org Total)";
+
+      const sel = document.getElementById("trafficSiteSelect");
+      if (sel && Array.isArray(data.available_sites)) {
+        const curVal = data.site_id || "all";
+        sel.innerHTML = `<option value="all">All Sites (Org Total)</option>` +
+          data.available_sites.map(s => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.name)}</option>`).join("");
+        sel.value = [...sel.options].some(o => o.value === curVal) ? curVal : "all";
+      }
+
+      const metaParts = [
+        `${fmtNum(data.sites_with_data ?? 0)}/${fmtNum(data.sites_queried ?? 0)} sites active`,
+        `Mist metric: ${data.metric_used || "--"}`,
+        data.timezone || "Europe/London"
+      ];
+      if (data.warnings && data.warnings.length) {
+        metaParts.push(`Notice: ${data.warnings.join(" | ")}`);
+      }
+      document.getElementById("trafficMetaLeft").textContent = metaParts.join(" · ");
+      const fetched = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "just now";
+      document.getElementById("trafficMetaRight").textContent = `Updated ${fetched}${data.cached ? " (cached)" : ""}`;
+
+      renderTrafficSitesTable(data);
+      if (activeTabId === "tab-traffic") {
+        renderTrafficChart(data);
+      }
+      renderWallboardTabs();
+    }
+    async function loadTraffic(force = false, silent = false) {
+      if (trafficState.loading && !force) return;
+      trafficState.loading = true;
+      const btn = document.getElementById("refreshTrafficBtn");
+      const statusEl = document.getElementById("trafficStatusMsg");
+      const wrapEl = document.getElementById("trafficChartWrap");
+      if (btn) btn.disabled = true;
+      if (!silent && !trafficState.data && statusEl && wrapEl) {
+        wrapEl.style.display = "none";
+        statusEl.style.display = "block";
+        statusEl.textContent = `Querying Mist Insights across sites for the last ${trafficState.days === 1 ? "24 hours" : trafficState.days + " days"}...`;
+      }
+      const qs = new URLSearchParams({ days: String(trafficState.days), site_id: trafficState.siteId || "all" });
+      if (force) qs.set("refresh", "1");
+      try {
+        const res = await fetch(`/api/traffic?${qs.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || data.login_required) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        renderTraffic(data);
+      } catch (err) {
+        if (!silent) {
+          const banner = document.getElementById("errorBanner");
+          banner.textContent = "Error loading Mist traffic usage: " + err.message;
+          banner.style.display = "block";
+          if (statusEl) {
+            statusEl.style.display = "block";
+            statusEl.textContent = "Failed to load traffic usage: " + err.message;
+          }
+        }
+      } finally {
+        trafficState.loading = false;
+        if (btn) btn.disabled = false;
+      }
+    }
+    function exportTrafficCsv() {
+      const d = trafficState.data;
+      if (!d) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      const scopeSlug = (d.site_id === "all" ? "org-total" : (d.site_name || d.site_id)).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      if (trafficState.view === "daily") {
+        const rows = d.daily_points || [];
+        if (!rows.length) return;
+        downloadCsv(
+          `mist-traffic-daily-${d.days}d-${scopeSlug}-${dateStamp}.csv`,
+          ["Date", "Day", "Total GB", "TX Downstream GB", "RX Upstream GB", "Avg Throughput (Mbps)", "Peak Hourly Throughput (Mbps)", "Total Bytes"],
+          rows.map(p => [p.date ?? "", p.full_label ?? "", p.total_gb ?? 0, p.tx_gb ?? 0, p.rx_gb ?? 0, p.avg_mbps ?? 0, p.peak_mbps ?? 0, p.total_bytes ?? 0])
+        );
+      } else {
+        const rows = d.hourly_points || [];
+        if (!rows.length) return;
+        downloadCsv(
+          `mist-traffic-hourly-${d.days}d-${scopeSlug}-${dateStamp}.csv`,
+          ["Timestamp (UTC)", "Hour (Local)", "Total GB", "TX Downstream GB", "RX Upstream GB", "Avg Throughput (Mbps)", "TX Mbps", "RX Mbps", "Total Bytes"],
+          rows.map(p => [
+            p.ts ? new Date(p.ts * 1000).toISOString() : "",
+            p.full_label ?? "",
+            p.total_gb ?? 0,
+            p.tx_gb ?? 0,
+            p.rx_gb ?? 0,
+            p.avg_mbps ?? 0,
+            p.tx_mbps ?? 0,
+            p.rx_mbps ?? 0,
+            p.total_bytes ?? 0
+          ])
+        );
+      }
+    }
+
     function setNacProfileFilter(prof) {
       nacState.profile = prof || "all";
       renderNacRejectsTable();
@@ -2207,7 +2742,15 @@
       const params = new URLSearchParams(window.location.search);
       const qInterval = params.get("interval");
       if (qInterval) setWallboardInterval(qInterval);
-      if (params.get("wallboard") === "1") toggleWallboardMode(true);
+      if (params.get("wallboard") === "1") {
+        toggleWallboardMode(true);
+      } else {
+        const qTab = (params.get("tab") || "").trim();
+        if (qTab) {
+          const targetId = qTab.startsWith("tab-") ? qTab : `tab-${qTab}`;
+          if (document.getElementById(targetId)) switchTab(targetId);
+        }
+      }
     })();
     loadStats(false);
   </script>

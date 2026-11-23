@@ -1040,6 +1040,20 @@ def index():
     return resp
 
 
+@app.get("/favicon.svg")
+def favicon_svg():
+    resp = send_from_directory(str(BASE_DIR), "favicon.svg", mimetype="image/svg+xml")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
+@app.get("/favicon.ico")
+def favicon_ico():
+    resp = send_from_directory(str(BASE_DIR), "favicon.ico", mimetype="image/x-icon")
+    resp.headers["Cache-Control"] = "public, max-age=86400"
+    return resp
+
+
 @app.get("/health")
 def health():
     return jsonify(

@@ -1333,9 +1333,11 @@
     body.wallboard-mode .hist-controls,
     body.wallboard-mode .traffic-controls,
     body.wallboard-mode .nac-controls,
+    body.wallboard-mode .vc-temp-controls,
     body.wallboard-mode #exportHistoryBtn,
     body.wallboard-mode #exportTrafficBtn,
-    body.wallboard-mode #exportNacRejectsBtn { display: none !important; }
+    body.wallboard-mode #exportNacRejectsBtn,
+    body.wallboard-mode #exportVcTempsBtn { display: none !important; }
     body.wallboard-mode .title-block h1 { font-size: 1.9rem; }
     body.wallboard-mode .kpi-grid { grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 22px; }
     body.wallboard-mode .kpi-card { padding: 24px 28px; }
@@ -1357,7 +1359,221 @@
     body.wallboard-mode .alarm-item { font-size: 0.98rem; padding: 14px 16px; }
     body.wallboard-mode #tab-history .kpi-grid,
     body.wallboard-mode #tab-traffic .kpi-grid,
-    body.wallboard-mode #tab-nac-rejects .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+    body.wallboard-mode #tab-nac-rejects .kpi-grid,
+    body.wallboard-mode #tab-hottest-vcs .kpi-grid { grid-template-columns: repeat(4, 1fr); }
+
+    /* Hottest VCs Thermal Alarms & Controls */
+    .thermal-alarm-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      background: linear-gradient(90deg, rgba(248, 113, 113, 0.16) 0%, rgba(248, 113, 113, 0.08) 100%);
+      border: 1px solid rgba(248, 113, 113, 0.48);
+      color: #fecaca;
+      padding: 10px 15px;
+      border-radius: 12px;
+      margin-bottom: 16px;
+      font-size: 0.84rem;
+      box-shadow: 0 10px 28px -12px rgba(248, 113, 113, 0.4);
+      animation: paneEnter 220ms var(--ease-out);
+    }
+
+    .thermal-alarm-banner.visible { display: flex; }
+
+    .thermal-alarm-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .alarm-pulse-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--red);
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .alarm-pulse-dot::after {
+      content: "";
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 1.5px solid var(--red);
+      animation: pulseRing 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    }
+
+    .threshold-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 6px 3px 10px;
+      border-radius: 10px;
+      background: rgba(8, 13, 23, 0.85);
+      border: 1px solid var(--border-subtle);
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      font-weight: 600;
+    }
+
+    input.threshold-input {
+      width: 58px;
+      background: var(--bg-surface-2);
+      color: var(--text-primary);
+      border: 1px solid var(--border-strong);
+      border-radius: 7px;
+      padding: 4px 7px;
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 700;
+      text-align: center;
+    }
+
+    input.threshold-input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.18);
+    }
+
+    .temp-cell {
+      display: inline-flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 112px;
+    }
+
+    .temp-val-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .temp-val {
+      font-size: 0.96rem;
+      font-weight: 700;
+    }
+
+    .temp-val.ok { color: var(--green); }
+    .temp-val.warn { color: var(--amber); }
+    .temp-val.alarm { color: var(--red); }
+
+    .temp-delta {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
+
+    .temp-delta.alarm { color: #fca5a5; font-weight: 600; }
+
+    .temp-bar-track {
+      height: 5px;
+      width: 100%;
+      border-radius: 999px;
+      background: rgba(148, 163, 184, 0.14);
+      overflow: hidden;
+    }
+
+    .temp-bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 550ms var(--ease-out);
+    }
+
+    .member-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin-top: 4px;
+    }
+
+    .member-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 0.69rem;
+      padding: 1.5px 6px;
+      border-radius: 5px;
+      background: rgba(20, 31, 52, 0.85);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+    }
+
+    .member-chip.alarm {
+      background: rgba(248, 113, 113, 0.16);
+      border-color: rgba(248, 113, 113, 0.45);
+      color: #fecaca;
+      font-weight: 600;
+    }
+
+    .member-chip.warn {
+      background: rgba(251, 191, 36, 0.14);
+      border-color: rgba(251, 191, 36, 0.4);
+      color: #fde68a;
+    }
+
+    tr.thermal-alarm-row td {
+      background: rgba(248, 113, 113, 0.08);
+    }
+
+    tr.thermal-alarm-row:hover td {
+      background: rgba(248, 113, 113, 0.13);
+    }
+
+    tr.thermal-alarm-row td:first-child {
+      box-shadow: inset 3px 0 0 var(--red);
+    }
+
+    .rank-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 8px;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      font-weight: 700;
+      background: rgba(20, 31, 52, 0.9);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+    }
+
+    .rank-badge.top3 {
+      background: rgba(251, 191, 36, 0.14);
+      border-color: rgba(251, 191, 36, 0.38);
+      color: var(--amber);
+    }
+
+    .rank-badge.alarm {
+      background: rgba(248, 113, 113, 0.18);
+      border-color: rgba(248, 113, 113, 0.48);
+      color: var(--red);
+    }
+
+    .vc-alarms-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .vc-alarm-card {
+      background: linear-gradient(180deg, rgba(248, 113, 113, 0.14) 0%, rgba(248, 113, 113, 0.06) 100%);
+      border: 1px solid rgba(248, 113, 113, 0.42);
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
 
     /* Keyframes */
     @keyframes paneEnter {
@@ -1471,6 +1687,14 @@
       <button type="button" class="btn-secondary" style="padding:5px 11px;font-size:0.78rem;" onclick="toggleAutoSync(false)">Resume Auto-Sync</button>
     </div>
 
+    <div id="globalThermalAlarmBanner" class="thermal-alarm-banner" role="alert">
+      <div class="thermal-alarm-left">
+        <span class="alarm-pulse-dot" aria-hidden="true"></span>
+        <span id="globalThermalAlarmText"><strong>HIGH TEMP ALARM:</strong> One or more Virtual Chassis are above threshold.</span>
+      </div>
+      <button type="button" class="btn-secondary" style="padding:5px 12px;font-size:0.78rem;border-color:rgba(248,113,113,0.45);color:#fecaca;" onclick="switchTab('tab-hottest-vcs')">Inspect Hottest VCs &rarr;</button>
+    </div>
+
     <div id="wallboardBar" class="wallboard-bar">
       <div class="wb-bar-top">
         <div id="wbTabs" class="wb-tabs"></div>
@@ -1534,6 +1758,13 @@
               <span>APs &lt; 1Gb</span>
             </span>
             <span id="navApIssuesCount" class="pill neutral">Scan</span>
+          </button>
+          <button class="nav-tab" data-tab="tab-hottest-vcs" onclick="switchTab('tab-hottest-vcs')">
+            <span class="nav-tab-left">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+              <span>Hottest VCs</span>
+            </span>
+            <span id="navHotVcsCount" class="pill neutral">Scan</span>
           </button>
           <button class="nav-tab" data-tab="tab-nac-rejects" onclick="switchTab('tab-nac-rejects')">
             <span class="nav-tab-left">
@@ -2042,6 +2273,131 @@
           </div>
         </div>
 
+        <!-- TAB 5B: TOP 10 HOTTEST VCs & THERMAL ALARMS -->
+        <div id="tab-hottest-vcs" class="tab-pane">
+          <section class="kpi-grid">
+            <div class="kpi-card kpi-down-ok" id="kpiVcMaxTempCard">
+              <div>
+                <div class="kpi-head"><div class="kpi-label">Hottest VC Peak</div><span class="kpi-dot" id="dotVcMaxTemp"></span></div>
+                <div class="kpi-value" id="kpiVcMaxTemp">--</div>
+                <div class="kpi-sub" id="kpiVcMaxTempSub">Awaiting thermal telemetry</div>
+              </div>
+              <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barVcMaxTemp" style="background:var(--green);"></span></div>
+            </div>
+            <div class="kpi-card kpi-down-ok" id="kpiVcAlarmsCard">
+              <div>
+                <div class="kpi-head"><div class="kpi-label">Above Threshold (Alarms)</div><span class="kpi-dot"></span></div>
+                <div class="kpi-value" id="kpiVcAlarms">--</div>
+                <div class="kpi-sub" id="kpiVcAlarmsSub">Alarm threshold: ≥ 60°C</div>
+              </div>
+              <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barVcAlarms" style="background:var(--green);"></span></div>
+            </div>
+            <div class="kpi-card kpi-wireless">
+              <div>
+                <div class="kpi-head"><div class="kpi-label">Average VC Peak Temp</div><span class="kpi-dot"></span></div>
+                <div class="kpi-value" id="kpiVcAvgTemp">--</div>
+                <div class="kpi-sub" id="kpiVcAvgTempSub">Across monitored VCs</div>
+              </div>
+            </div>
+            <div class="kpi-card kpi-aps" id="kpiVcHwHealthCard">
+              <div>
+                <div class="kpi-head"><div class="kpi-label">Fan &amp; PSU Health</div><span class="kpi-dot"></span></div>
+                <div class="kpi-value" id="kpiVcHwHealth">--</div>
+                <div class="kpi-sub" id="kpiVcHwHealthSub">Hardware telemetry on VCs</div>
+              </div>
+            </div>
+          </section>
+
+          <div id="vcActiveAlarmsPanel" class="panel" style="display:none;border-color:rgba(248,113,113,0.45);">
+            <div class="panel-header" style="margin-bottom:10px;">
+              <div class="panel-actions">
+                <span class="alarm-pulse-dot" aria-hidden="true"></span>
+                <h2 class="panel-title" style="color:#fecaca;">Active High-Temperature Alarms</h2>
+                <span id="vcActiveAlarmsBadge" class="pill bad">0 Alarmed</span>
+              </div>
+              <span class="meta-text" id="vcActiveAlarmsHint">Triggering at ≥ 60°C or Mist sensor fault</span>
+            </div>
+            <div id="vcActiveAlarmsGrid" class="vc-alarms-grid"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title" id="vcTempsTitle">Top 10 Hottest Virtual Chassis (VCs)</h2>
+                <span id="vcTempsBadge" class="pill neutral">Not Scanned</span>
+              </div>
+              <div class="panel-actions vc-temp-controls">
+                <div class="filter-group">
+                  <button class="filter-btn active" data-vc-scope="vc" onclick="setVcTempScope('vc')">VCs Only (<span id="vcScopeVcCount">0</span>)</button>
+                  <button class="filter-btn" data-vc-scope="all" onclick="setVcTempScope('all')">All Switches (<span id="vcScopeAllCount">0</span>)</button>
+                </div>
+                <div class="threshold-control" title="Set high-temperature alarm threshold in Celsius (25–95°C)">
+                  <label for="vcThresholdInput" style="margin:0;cursor:pointer;">Alarm &ge;</label>
+                  <input id="vcThresholdInput" class="threshold-input" type="number" min="25" max="95" step="1" value="60" onkeydown="if(event.key==='Enter') applyVcTempThreshold()" />
+                  <span>&deg;C</span>
+                  <button id="vcThresholdSaveBtn" type="button" class="filter-btn" style="background:var(--bg-surface-2);color:var(--accent);border:1px solid rgba(56,189,248,0.35);padding:4px 9px;" onclick="applyVcTempThreshold()">Set</button>
+                </div>
+                <input id="vcTempsFilter" class="search" type="search" placeholder="Filter VC, site, model, MAC..." oninput="renderVcTempsSection()" />
+                <button id="scanVcTempsBtn" onclick="scanVcTemps(true)">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+                  <span id="scanVcTempsBtnLabel">Scan VC Temps</span>
+                </button>
+                <button id="exportVcTempsBtn" class="btn-secondary" onclick="exportVcTempsCsv()" disabled>Export CSV</button>
+              </div>
+            </div>
+
+            <div id="vcTempsOnDemandGate" class="ondemand-gate">
+              <div class="ondemand-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/></svg>
+              </div>
+              <h3>On-Demand Virtual Chassis Thermal Scan</h3>
+              <p>Reads per-FPC chassis temperature sensors, fans, and PSU health across sites with online switches to rank the Top 10 hottest Virtual Chassis and raise alarms above your configured threshold.</p>
+              <div class="estimate-strip">
+                <span id="vcTempsEstimatePill" class="estimate-pill heavy">Est. ~-- API calls</span>
+                <span class="estimate-pill">Cached 15 min on server</span>
+                <span id="vcTempsGateThresholdPill" class="estimate-pill">Alarm threshold: &ge; 60&deg;C</span>
+              </div>
+              <div class="ondemand-actions">
+                <button id="vcTempsGateScanBtn" type="button" onclick="scanVcTemps(true)">
+                  <span id="vcTempsGateScanLabel">Scan VC Temperatures</span>
+                </button>
+              </div>
+            </div>
+
+            <div id="vcTempsSkeleton" class="skel-table" style="display:none;">
+              <div class="skel skel-chart" style="height:240px;"></div>
+              <div class="skel-row"><span class="skel skel-line w-40"></span><span class="skel skel-line w-80"></span><span class="skel skel-line w-60"></span><span class="skel skel-line w-60"></span><span class="skel skel-line w-40"></span></div>
+              <div class="skel-row"><span class="skel skel-line w-40"></span><span class="skel skel-line w-60"></span><span class="skel skel-line w-80"></span><span class="skel skel-line w-60"></span><span class="skel skel-line w-40"></span></div>
+            </div>
+
+            <div id="vcTempsChartWrap" class="chart-wrap" style="display:none;height:285px;margin-bottom:18px;">
+              <canvas id="vcTempsChart"></canvas>
+            </div>
+
+            <div id="vcTempsTableWrap" class="table-wrap" style="display:none;">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Virtual Chassis &amp; IP / MAC</th>
+                    <th>Site</th>
+                    <th>Peak Temp</th>
+                    <th>Hottest Member &amp; Stack Sensors</th>
+                    <th>Fans / PSUs</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="vcTempsBody"></tbody>
+              </table>
+            </div>
+
+            <div class="hist-footer">
+              <span id="vcTempsMetaLeft">Ranks Top 10 hottest Virtual Chassis by peak FPC sensor temperature; alarms any VC &ge; threshold or reporting a hardware thermal fault.</span>
+              <span id="vcTempsMetaRight">Not scanned yet</span>
+            </div>
+          </div>
+        </div>
+
         <!-- TAB 6: RECENT ALARMS -->
         <div id="tab-alarms" class="tab-pane">
           <div class="panel">
@@ -2340,6 +2696,7 @@
       { id: "tab-traffic", label: "Traffic Usage", countId: "navTrafficTotal" },
       { id: "tab-sites", label: "All Site Breakdown", countId: "navSitesCount" },
       { id: "tab-ap-issues", label: "APs < 1Gb", countId: "navApIssuesCount" },
+      { id: "tab-hottest-vcs", label: "Hottest VCs", countId: "navHotVcsCount" },
       { id: "tab-nac-rejects", label: "NAC Server Rejects", countId: "navNacRejectsCount" },
       { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
     ];
@@ -2365,10 +2722,11 @@
       Chart.defaults.color = "#94a3b8";
     }
 
-    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, trafficChart = null, clientRssiChart = null;
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, trafficChart = null, clientRssiChart = null, vcTempsChart = null;
     let countdown = 300, devicesDownTypeFilter = "all";
     let pollingState = { paused: false, paused_at: null, paused_by: null, toggling: false };
     let slowApState = { scanning: false };
+    let vcTempState = { scanning: false, scope: "vc", autoScoped: false };
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
     let trafficState = { days: 5, siteId: "all", view: "volume", start: null, end: null, isCustom: false, data: null, loading: false };
     let nacState = { duration: "24h", profile: "all", data: null, loading: false, fetchedAtMs: 0 };
@@ -2612,6 +2970,11 @@
       if (activePane) {
         activePane.querySelectorAll(".table-wrap, .alarm-list").forEach(el => { el.scrollTop = 0; });
       }
+      const gThermal = document.getElementById("globalThermalAlarmBanner");
+      if (gThermal) {
+        const hasAlarm = (getScopedVcTemps().some(x => x.above_threshold));
+        gThermal.classList.toggle("visible", Boolean(latestData?.vc_temps_meta?.scanned && hasAlarm && tabId !== "tab-hottest-vcs"));
+      }
       renderWallboardTabs();
       if (wbActive) updateWallboardProgress();
       if (tabId === "tab-home" && latestData) {
@@ -2631,6 +2994,9 @@
       } else if (tabId === "tab-ap-issues") {
         // Strictly ON-DEMAND: show scan gate unless already scanned
         renderSlowApsSection();
+      } else if (tabId === "tab-hottest-vcs") {
+        // Auto-populated if org stats include switch temps, otherwise shows on-demand scan gate
+        setTimeout(() => renderVcTempsSection(), 30);
       } else if (tabId === "tab-nac-rejects") {
         // Strictly ON-DEMAND: never auto-fire NAC reject pull on tab switch
         if (nacState.data) {
@@ -3057,6 +3423,551 @@
       }
     }
 
+    /* Top 10 Hottest VCs & Thermal Alarms */
+    function setVcTempScope(scope) {
+      vcTempState.scope = scope === "all" ? "all" : "vc";
+      vcTempState.autoScoped = true;
+      document.querySelectorAll("[data-vc-scope]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.vcScope === vcTempState.scope)
+      );
+      renderVcTempsSection();
+    }
+
+    function getScopedVcTemps() {
+      const allItems = latestData?.vc_temps || [];
+      if (vcTempState.scope === "all") return allItems;
+      return allItems.filter(x => x.is_vc);
+    }
+
+    function getFilteredVcTemps() {
+      const q = (document.getElementById("vcTempsFilter")?.value || "").trim().toLowerCase();
+      return getScopedVcTemps().filter(item => {
+        if (!q) return true;
+        return (
+          (item.name || "").toLowerCase().includes(q) ||
+          (item.site_name || "").toLowerCase().includes(q) ||
+          (item.model || "").toLowerCase().includes(q) ||
+          (item.mac || "").toLowerCase().includes(q) ||
+          (item.vc_mac || "").toLowerCase().includes(q) ||
+          (item.ip || "").toLowerCase().includes(q) ||
+          (item.hottest_sensor || "").toLowerCase().includes(q) ||
+          (item.hottest_member || "").toLowerCase().includes(q)
+        );
+      });
+    }
+
+    function renderVcTempsChart(top10, thresholdC) {
+      if (typeof Chart === "undefined") return;
+      const wrap = document.getElementById("vcTempsChartWrap");
+      if (!wrap) return;
+      if (!top10.length) {
+        if (vcTempsChart) { vcTempsChart.destroy(); vcTempsChart = null; }
+        wrap.style.display = "none";
+        return;
+      }
+      wrap.style.display = "block";
+      const maxVal = Math.max(thresholdC + 10, ...top10.map(x => Number(x.peak_temp_c) || 0), 75);
+      const suggestedMax = Math.ceil(maxVal / 5) * 5;
+
+      const thresholdLinePlugin = {
+        id: "vcThresholdLine",
+        afterDatasetsDraw(chart) {
+          const { ctx, chartArea, scales } = chart;
+          const xScale = scales?.x;
+          if (!xScale || !chartArea) return;
+          const xPos = xScale.getPixelForValue(thresholdC);
+          if (xPos < chartArea.left || xPos > chartArea.right) return;
+          ctx.save();
+          ctx.beginPath();
+          ctx.setLineDash([6, 4]);
+          ctx.strokeStyle = "rgba(248, 113, 113, 0.9)";
+          ctx.lineWidth = 1.8;
+          ctx.moveTo(xPos, chartArea.top);
+          ctx.lineTo(xPos, chartArea.bottom);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          const label = `Alarm ${thresholdC}°C`;
+          ctx.font = "600 11px 'JetBrains Mono', monospace";
+          const tw = ctx.measureText(label).width;
+          const bx = Math.min(chartArea.right - tw - 12, Math.max(chartArea.left + 4, xPos - tw / 2 - 6));
+          ctx.fillStyle = "rgba(127, 29, 29, 0.92)";
+          ctx.strokeStyle = "rgba(248, 113, 113, 0.65)";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(bx, chartArea.top + 4, tw + 12, 20, 5);
+          else ctx.rect(bx, chartArea.top + 4, tw + 12, 20);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "#fecaca";
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, bx + 6, chartArea.top + 14);
+          ctx.restore();
+        }
+      };
+
+      if (vcTempsChart) vcTempsChart.destroy();
+      vcTempsChart = new Chart(document.getElementById("vcTempsChart"), {
+        type: "bar",
+        data: {
+          labels: top10.map((x, idx) => `#${idx + 1} ${x.name}`),
+          datasets: [{
+            label: "Peak Temp (°C)",
+            data: top10.map(x => x.peak_temp_c),
+            backgroundColor: top10.map(x =>
+              x.alarm_state === "alarm" ? "rgba(248, 113, 113, 0.88)"
+                : x.alarm_state === "warn" ? "rgba(251, 191, 36, 0.85)"
+                : "rgba(56, 189, 248, 0.82)"
+            ),
+            borderRadius: 6,
+            barThickness: 18
+          }]
+        },
+        options: {
+          indexAxis: "y",
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: CHART_ANIM,
+          scales: {
+            x: {
+              beginAtZero: true,
+              suggestedMax,
+              ticks: { color: "#94a3b8", font: { family: "'JetBrains Mono', monospace", size: 10.5 }, callback: v => `${v}°C` },
+              grid: { color: "rgba(148, 163, 184, 0.1)" }
+            },
+            y: {
+              ticks: { color: "#e2e8f0", font: { family: "'JetBrains Mono', monospace", size: 11 } },
+              grid: { display: false }
+            }
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              ...CHART_TOOLTIP_STYLE,
+              callbacks: {
+                title: items => {
+                  const it = top10[items[0]?.dataIndex];
+                  return it ? `${it.name} (${it.site_name})` : "";
+                },
+                label: ctx => {
+                  const it = top10[ctx.dataIndex];
+                  const delta = it.delta_threshold_c >= 0 ? `+${it.delta_threshold_c}°C over threshold` : `${Math.abs(it.delta_threshold_c)}°C below threshold`;
+                  return `Peak: ${it.peak_temp_c}°C (${delta})`;
+                },
+                footer: items => {
+                  const it = top10[items[0]?.dataIndex];
+                  if (!it) return "";
+                  return `${it.hottest_member || "Chassis"} · ${it.hottest_sensor || "Sensor"} · ${it.member_count} member${it.member_count === 1 ? "" : "s"}`;
+                }
+              }
+            }
+          }
+        },
+        plugins: [thresholdLinePlugin]
+      });
+    }
+
+    function renderVcTempsSection() {
+      const meta = latestData?.vc_temps_meta || {};
+      const allItems = latestData?.vc_temps || [];
+      const scanned = Boolean(meta.scanned);
+      const thresholdC = typeof meta.threshold_c === "number" ? meta.threshold_c : 60;
+      const warnC = typeof meta.warn_c === "number" ? meta.warn_c : Math.max(20, thresholdC - 5);
+      const estCalls = meta.estimated_calls || latestData?.estimates?.vc_temps_scan_calls || 1;
+      const activeSwSites = meta.active_switch_sites_count || estCalls;
+
+      // Auto-select All Switches only if scanned and org has 0 multi-member VCs
+      if (scanned && !vcTempState.autoScoped && (meta.vc_count || 0) === 0 && allItems.length > 0) {
+        vcTempState.scope = "all";
+        vcTempState.autoScoped = true;
+      }
+      document.querySelectorAll("[data-vc-scope]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.vcScope === vcTempState.scope)
+      );
+
+      const vcCountEl = document.getElementById("vcScopeVcCount");
+      const allCountEl = document.getElementById("vcScopeAllCount");
+      if (vcCountEl) vcCountEl.textContent = fmtNum(meta.vc_count || 0);
+      if (allCountEl) allCountEl.textContent = fmtNum(meta.switch_count || allItems.length);
+
+      const threshInp = document.getElementById("vcThresholdInput");
+      if (threshInp && document.activeElement !== threshInp) threshInp.value = String(thresholdC);
+      const gateThresh = document.getElementById("vcTempsGateThresholdPill");
+      if (gateThresh) gateThresh.textContent = `Alarm threshold: ≥ ${thresholdC}°C`;
+
+      const estPill = document.getElementById("vcTempsEstimatePill");
+      const gateBtnLbl = document.getElementById("vcTempsGateScanLabel");
+      const topBtnLbl = document.getElementById("scanVcTempsBtnLabel");
+      if (estPill) {
+        estPill.textContent = `Est. ~${fmtNum(estCalls)} API call${estCalls === 1 ? "" : "s"} (${fmtNum(activeSwSites)} switch site${activeSwSites === 1 ? "" : "s"})`;
+        estPill.className = `estimate-pill ${estCalls <= 10 ? "fast" : "heavy"}`;
+      }
+      if (gateBtnLbl) gateBtnLbl.textContent = `Scan VC Temperatures (~${fmtNum(estCalls)} call${estCalls === 1 ? "" : "s"})`;
+      if (topBtnLbl) {
+        topBtnLbl.textContent = scanned
+          ? (meta.source === "org_stats" ? "Refresh Temps (1 call)" : `Re-Scan (~${fmtNum(estCalls)} calls)`)
+          : `Scan VC Temps (~${fmtNum(estCalls)} calls)`;
+      }
+
+      const scopedAll = getScopedVcTemps();
+      const alarmedAll = scopedAll.filter(x => x.above_threshold);
+      const navBadge = document.getElementById("navHotVcsCount");
+      const globalBanner = document.getElementById("globalThermalAlarmBanner");
+      const globalText = document.getElementById("globalThermalAlarmText");
+
+      if (!scanned) {
+        if (navBadge) { navBadge.textContent = "Scan"; navBadge.className = "pill neutral"; }
+        if (globalBanner) globalBanner.classList.remove("visible");
+      } else if (alarmedAll.length > 0) {
+        if (navBadge) {
+          navBadge.textContent = `${fmtNum(alarmedAll.length)} Alarm`;
+          navBadge.className = "pill bad";
+        }
+        if (globalBanner && globalText) {
+          const preview = alarmedAll.slice(0, 3).map(x => `${x.name} (${x.peak_temp_c}°C)`).join(", ");
+          const extra = alarmedAll.length > 3 ? ` +${alarmedAll.length - 3} more` : "";
+          globalText.innerHTML = `<strong>HIGH TEMP ALARM:</strong> ${fmtNum(alarmedAll.length)} ${vcTempState.scope === "all" ? "switch" : "VC"}${alarmedAll.length === 1 ? "" : "s"} above ${escapeHtml(thresholdC)}°C — <span style="font-family:var(--font-mono);color:#fff;">${escapeHtml(preview + extra)}</span>`;
+          globalBanner.classList.toggle("visible", activeTabId !== "tab-hottest-vcs");
+        }
+      } else {
+        const peakNum = scopedAll.length ? scopedAll[0].peak_temp_c : null;
+        if (navBadge) {
+          navBadge.textContent = typeof peakNum === "number" ? `${peakNum}°C` : "0";
+          navBadge.className = `pill ${typeof peakNum === "number" && peakNum >= warnC ? "warn" : "ok"}`;
+        }
+        if (globalBanner) globalBanner.classList.remove("visible");
+      }
+
+      const gate = document.getElementById("vcTempsOnDemandGate");
+      const skel = document.getElementById("vcTempsSkeleton");
+      const chartWrap = document.getElementById("vcTempsChartWrap");
+      const tableWrap = document.getElementById("vcTempsTableWrap");
+      const alarmsPanel = document.getElementById("vcActiveAlarmsPanel");
+      const exportBtn = document.getElementById("exportVcTempsBtn");
+
+      if (vcTempState.scanning) {
+        if (gate) gate.style.display = "none";
+        if (chartWrap) chartWrap.style.display = "none";
+        if (tableWrap) tableWrap.style.display = "none";
+        if (alarmsPanel) alarmsPanel.style.display = "none";
+        if (skel) skel.style.display = "flex";
+        return;
+      }
+
+      if (skel) skel.style.display = "none";
+
+      if (!scanned) {
+        if (gate) gate.style.display = "flex";
+        if (chartWrap) chartWrap.style.display = "none";
+        if (tableWrap) tableWrap.style.display = "none";
+        if (alarmsPanel) alarmsPanel.style.display = "none";
+        if (exportBtn) exportBtn.disabled = true;
+        document.getElementById("kpiVcAlarmsSub").textContent = `Alarm threshold: ≥ ${thresholdC}°C`;
+        const badge = document.getElementById("vcTempsBadge");
+        if (badge) { badge.textContent = "Not Scanned"; badge.className = "pill neutral"; }
+        const rightMeta = document.getElementById("vcTempsMetaRight");
+        if (rightMeta) rightMeta.textContent = "Not scanned yet";
+        return;
+      }
+
+      if (gate) gate.style.display = "none";
+      if (tableWrap) tableWrap.style.display = "block";
+
+      // Update KPI Cards
+      const hottest = scopedAll[0] || null;
+      const maxTemp = hottest ? hottest.peak_temp_c : null;
+      const avgTemp = scopedAll.length ? Math.round((scopedAll.reduce((a, b) => a + Number(b.peak_temp_c || 0), 0) / scopedAll.length) * 10) / 10 : null;
+      const hwFaults = scopedAll.reduce((a, b) => a + (b.fans_bad || 0) + (b.psus_bad || 0), 0);
+      const totalMembers = scopedAll.reduce((a, b) => a + (b.member_count || 1), 0);
+
+      const maxCard = document.getElementById("kpiVcMaxTempCard");
+      const maxBar = document.getElementById("barVcMaxTemp");
+      const maxDot = document.getElementById("dotVcMaxTemp");
+      if (hottest) {
+        animateKpiValue("kpiVcMaxTemp", maxTemp, n => `${n.toFixed(1)}°C`);
+        document.getElementById("kpiVcMaxTempSub").textContent = `${hottest.name} · ${hottest.hottest_member} (${hottest.hottest_sensor})`;
+        const isHotAlarm = hottest.alarm_state === "alarm";
+        const isHotWarn = hottest.alarm_state === "warn";
+        if (maxCard) maxCard.className = `kpi-card ${isHotAlarm ? "kpi-down-bad" : (isHotWarn ? "" : "kpi-down-ok")}`;
+        const cColor = isHotAlarm ? "var(--red)" : (isHotWarn ? "var(--amber)" : "var(--green)");
+        if (maxBar) maxBar.style.background = cColor;
+        if (maxDot) maxDot.style.background = cColor;
+        document.getElementById("kpiVcMaxTemp").style.color = cColor;
+        setBarWidth("barVcMaxTemp", Math.min(100, Math.max(8, (maxTemp / Math.max(85, thresholdC + 20)) * 100)));
+      } else {
+        document.getElementById("kpiVcMaxTemp").textContent = "--";
+        document.getElementById("kpiVcMaxTempSub").textContent = "No thermal sensors reported";
+        setBarWidth("barVcMaxTemp", 0);
+      }
+
+      animateKpiValue("kpiVcAlarms", alarmedAll.length);
+      document.getElementById("kpiVcAlarmsSub").textContent = alarmedAll.length > 0
+        ? `Exceeding ≥ ${thresholdC}°C threshold`
+        : `All ${vcTempState.scope === "all" ? "switches" : "VCs"} below ${thresholdC}°C`;
+      document.getElementById("kpiVcAlarmsCard").className = `kpi-card ${alarmedAll.length > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
+      const alarmsBar = document.getElementById("barVcAlarms");
+      if (alarmsBar) alarmsBar.style.background = alarmedAll.length > 0 ? "var(--red)" : "var(--green)";
+      setBarWidth("barVcAlarms", scopedAll.length > 0 ? (alarmedAll.length > 0 ? Math.max(15, (alarmedAll.length / scopedAll.length) * 100) : 100) : 0);
+
+      if (typeof avgTemp === "number") {
+        animateKpiValue("kpiVcAvgTemp", avgTemp, n => `${n.toFixed(1)}°C`);
+        document.getElementById("kpiVcAvgTempSub").textContent = `${fmtNum(scopedAll.length)} ${vcTempState.scope === "all" ? "switches" : "VCs"} · ${fmtNum(totalMembers)} FPC member${totalMembers === 1 ? "" : "s"}`;
+      } else {
+        document.getElementById("kpiVcAvgTemp").textContent = "--";
+        document.getElementById("kpiVcAvgTempSub").textContent = "No switches reporting temps";
+      }
+
+      const hwCard = document.getElementById("kpiVcHwHealthCard");
+      if (hwFaults > 0) {
+        animateKpiValue("kpiVcHwHealth", hwFaults, n => `${Math.round(n)} Fault${Math.round(n) === 1 ? "" : "s"}`);
+        document.getElementById("kpiVcHwHealthSub").textContent = "Fan or PSU hardware warning detected";
+        if (hwCard) hwCard.className = "kpi-card kpi-down-bad";
+      } else {
+        document.getElementById("kpiVcHwHealth").textContent = scopedAll.length ? "All OK" : "--";
+        document.getElementById("kpiVcHwHealthSub").textContent = scopedAll.length ? "All reported fans & PSUs healthy" : "No hardware telemetry";
+        if (hwCard) hwCard.className = "kpi-card kpi-aps";
+      }
+
+      // Active Alarms Panel inside the tab
+      if (alarmsPanel) {
+        if (alarmedAll.length > 0) {
+          alarmsPanel.style.display = "block";
+          document.getElementById("vcActiveAlarmsBadge").textContent = `${fmtNum(alarmedAll.length)} Alarm${alarmedAll.length === 1 ? "" : "s"}`;
+          document.getElementById("vcActiveAlarmsHint").textContent = `Triggering at ≥ ${thresholdC}°C or Mist sensor fault`;
+          document.getElementById("vcActiveAlarmsGrid").innerHTML = alarmedAll.map(vc => {
+            const overTxt = vc.delta_threshold_c >= 0 ? `+${vc.delta_threshold_c}°C over threshold` : "Mist sensor alert";
+            const hwNote = (vc.fans_bad > 0 || vc.psus_bad > 0)
+              ? ` · <strong style="color:var(--red);">${vc.fans_bad > 0 ? vc.fans_bad + " fan fault" : ""}${vc.fans_bad > 0 && vc.psus_bad > 0 ? ", " : ""}${vc.psus_bad > 0 ? vc.psus_bad + " PSU fault" : ""}</strong>`
+              : "";
+            return `<div class="vc-alarm-card">
+              <div style="min-width:0;">
+                <div style="font-weight:700;color:#fff;font-size:0.9rem;">${escapeHtml(vc.name)} <span class="pill type-switch" style="margin-left:4px;">${vc.is_vc ? `${vc.member_count}-member VC` : "Switch"}</span></div>
+                <div class="sub-cell" style="color:#fecaca;">${escapeHtml(vc.site_name)} · ${escapeHtml(vc.hottest_member)} (${escapeHtml(vc.hottest_sensor)})${hwNote}</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;">
+                <div style="font-family:var(--font-mono);font-size:1.25rem;font-weight:800;color:var(--red);">${escapeHtml(vc.peak_temp_c)}°C</div>
+                <div style="font-family:var(--font-mono);font-size:0.7rem;color:#fca5a5;">${escapeHtml(overTxt)}</div>
+              </div>
+            </div>`;
+          }).join("");
+        } else {
+          alarmsPanel.style.display = "none";
+        }
+      }
+
+      // Filter & take Top 10
+      const filtered = getFilteredVcTemps();
+      const top10 = filtered.slice(0, 10);
+      if (exportBtn) exportBtn.disabled = filtered.length === 0;
+
+      const titleEl = document.getElementById("vcTempsTitle");
+      if (titleEl) {
+        titleEl.textContent = vcTempState.scope === "all"
+          ? "Top 10 Hottest Switches & Virtual Chassis"
+          : "Top 10 Hottest Virtual Chassis (VCs)";
+      }
+
+      const badge = document.getElementById("vcTempsBadge");
+      if (badge) {
+        if (alarmedAll.length > 0) {
+          badge.textContent = `${fmtNum(alarmedAll.length)} Above ${thresholdC}°C`;
+          badge.className = "pill bad";
+        } else if (scopedAll.length > 0) {
+          badge.textContent = `Top ${Math.min(10, scopedAll.length)} of ${fmtNum(scopedAll.length)} · All Normal`;
+          badge.className = "pill ok";
+        } else {
+          badge.textContent = "0 Sensors Found";
+          badge.className = "pill neutral";
+        }
+      }
+
+      if (activeTabId === "tab-hottest-vcs") {
+        renderVcTempsChart(top10, thresholdC);
+      }
+
+      const tbody = document.getElementById("vcTempsBody");
+      if (tbody) {
+        if (!scopedAll.length) {
+          const hint = vcTempState.scope === "vc" && allItems.length > 0
+            ? 'No multi-member Virtual Chassis found — click "All Switches" above to view standalone switch temperatures.'
+            : "No switches reported temperature sensor telemetry in Mist.";
+          tbody.innerHTML = `<tr><td colspan="7" class="empty">${hint}</td></tr>`;
+        } else if (!top10.length) {
+          tbody.innerHTML = '<tr><td colspan="7" class="empty">No Virtual Chassis match the current filter.</td></tr>';
+        } else {
+          tbody.innerHTML = top10.map((vc, idx) => {
+            const rank = idx + 1;
+            const isAlarm = vc.alarm_state === "alarm";
+            const isWarn = vc.alarm_state === "warn";
+            const rankCls = isAlarm ? "alarm" : (rank <= 3 ? "top3" : "");
+            const barColor = isAlarm ? "var(--red)" : (isWarn ? "var(--amber)" : "var(--accent)");
+            const barPct = Math.min(100, Math.max(8, (Number(vc.peak_temp_c || 0) / Math.max(85, thresholdC + 20)) * 100));
+            const deltaTxt = vc.delta_threshold_c >= 0 ? `+${vc.delta_threshold_c}°C` : `${vc.delta_threshold_c}°C`;
+
+            const metaParts = [];
+            if (vc.model) metaParts.push(escapeHtml(vc.model));
+            if (vc.is_vc) metaParts.push(`<span class="pill type-switch">${vc.member_count}-member VC</span>`);
+            if (vc.ip) metaParts.push(renderCopyable(vc.ip, "IP"));
+            if (vc.vc_mac || vc.mac) metaParts.push(renderCopyable(vc.vc_mac || vc.mac, vc.vc_mac ? "VC MAC" : "MAC"));
+
+            const memberChips = (vc.members || []).slice(0, 6).map(m => {
+              const mCls = (m.peak_temp_c >= thresholdC || m.sensor_alarm) ? "alarm" : (m.peak_temp_c >= warnC ? "warn" : "");
+              return `<span class="member-chip ${mCls}" title="${escapeHtml(m.hottest_sensor || "")}">FPC${m.fpc_idx}: ${m.peak_temp_c}°C</span>`;
+            }).join("");
+
+            const hwParts = [];
+            if (vc.fans_total > 0) {
+              hwParts.push(vc.fans_bad > 0
+                ? `<span class="pill bad">${vc.fans_bad}/${vc.fans_total} Fan Fault</span>`
+                : `<span class="pill ok">Fans OK (${vc.fans_total})</span>`);
+            }
+            if (vc.psus_total > 0) {
+              hwParts.push(vc.psus_bad > 0
+                ? `<span class="pill bad">${vc.psus_bad}/${vc.psus_total} PSU Fault</span>`
+                : `<span class="pill ok">PSUs OK (${vc.psus_total})</span>`);
+            }
+            const hwCell = hwParts.length ? hwParts.join(" ") : '<span class="meta-text">--</span>';
+
+            const statusPill = isAlarm
+              ? `<span class="pill bad">ALARM &ge; ${thresholdC}°C</span>`
+              : isWarn
+              ? `<span class="pill warn">Warm (&ge; ${warnC}°C)</span>`
+              : `<span class="pill ok">Normal</span>`;
+
+            return `<tr class="${isAlarm ? "thermal-alarm-row" : ""}">
+              <td><span class="rank-badge ${rankCls}">#${rank}</span></td>
+              <td><strong>${escapeHtml(vc.name)}</strong>${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
+              <td>${escapeHtml(vc.site_name)}</td>
+              <td>
+                <div class="temp-cell">
+                  <div class="temp-val-row">
+                    <span class="temp-val ${vc.alarm_state}">${escapeHtml(vc.peak_temp_c)}°C</span>
+                    <span class="temp-delta ${isAlarm ? "alarm" : ""}">${escapeHtml(deltaTxt)}</span>
+                  </div>
+                  <div class="temp-bar-track"><div class="temp-bar-fill" style="width:${barPct.toFixed(1)}%;background:${barColor};"></div></div>
+                </div>
+              </td>
+              <td>
+                <strong>${escapeHtml(vc.hottest_member || "Chassis")}</strong>
+                <span class="sub-cell">${escapeHtml(vc.hottest_sensor || "Sensor")} · avg ${escapeHtml(vc.avg_temp_c)}°C</span>
+                ${memberChips ? `<div class="member-chips">${memberChips}</div>` : ""}
+              </td>
+              <td>${hwCell}</td>
+              <td>${statusPill}</td>
+            </tr>`;
+          }).join("");
+        }
+      }
+
+      const rightMeta = document.getElementById("vcTempsMetaRight");
+      if (rightMeta) {
+        const when = meta.scanned_at ? new Date(meta.scanned_at).toLocaleTimeString() : "just now";
+        const srcTxt = meta.source === "org_stats" ? "org switch stats (0 extra calls)" : (typeof meta.calls_used === "number" ? fmtCalls(meta.calls_used) : "on-demand scan");
+        rightMeta.textContent = `Updated ${when} · ${srcTxt}`;
+      }
+      renderWallboardTabs();
+    }
+
+    async function scanVcTemps(force = true) {
+      if (vcTempState.scanning) return;
+      vcTempState.scanning = true;
+      const b1 = document.getElementById("scanVcTempsBtn");
+      const b2 = document.getElementById("vcTempsGateScanBtn");
+      const badge = document.getElementById("vcTempsBadge");
+      if (b1) b1.disabled = true;
+      if (b2) b2.disabled = true;
+      if (badge) { badge.textContent = "Scanning..."; badge.className = "pill type-ap"; }
+      renderVcTempsSection();
+
+      try {
+        const res = await fetch("/api/vc-temps/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data.api_quota) renderApiQuota(data.api_quota);
+        if (res.status === 401 || data.login_required) { window.location.href = "/login"; return; }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+
+        if (!latestData) latestData = {};
+        latestData.vc_temps = data.vc_temps || [];
+        latestData.vc_temps_meta = data.vc_temps_meta || { scanned: true, source: "on_demand" };
+
+        const alarmCnt = latestData.vc_temps_meta.alarmed_count || 0;
+        const callsNote = data.cached ? "served from cache" : fmtCalls(data.calls_used || 0);
+        showToast(
+          alarmCnt > 0 ? `VC Thermal Alarm: ${alarmCnt} above threshold` : "VC thermal scan complete",
+          callsNote,
+          alarmCnt > 0 ? "warn" : "ok"
+        );
+      } catch (err) {
+        const banner = document.getElementById("errorBanner");
+        if (banner) {
+          banner.textContent = "VC thermal scan failed: " + err.message;
+          banner.style.display = "block";
+        }
+      } finally {
+        vcTempState.scanning = false;
+        if (b1) b1.disabled = false;
+        if (b2) b2.disabled = false;
+        renderVcTempsSection();
+      }
+    }
+
+    async function applyVcTempThreshold() {
+      const inp = document.getElementById("vcThresholdInput");
+      const btn = document.getElementById("vcThresholdSaveBtn");
+      const raw = parseFloat(inp?.value || "");
+      if (!Number.isFinite(raw) || raw < 25 || raw > 95) {
+        showToast("Invalid threshold", "Enter a value between 25°C and 95°C", "warn");
+        return;
+      }
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch("/api/vc-temps/threshold", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ threshold_c: raw })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 401 || data.login_required) { window.location.href = "/login"; return; }
+        if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+
+        if (!latestData) latestData = {};
+        if (Array.isArray(data.vc_temps)) latestData.vc_temps = data.vc_temps;
+        if (data.vc_temps_meta) latestData.vc_temps_meta = data.vc_temps_meta;
+        renderVcTempsSection();
+        const alarmCnt = data.vc_temps_meta?.alarmed_count || 0;
+        showToast(
+          `Alarm threshold set to ${data.threshold_c}°C`,
+          alarmCnt > 0 ? `${alarmCnt} VC${alarmCnt === 1 ? "" : "s"} currently above threshold` : "0 alarms active",
+          alarmCnt > 0 ? "warn" : "ok"
+        );
+      } catch (err) {
+        showToast("Threshold update failed", err.message, "warn");
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    function exportVcTempsCsv() {
+      const rows = getFilteredVcTemps();
+      if (!rows.length) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(
+        `mist-hottest-vcs-${dateStamp}.csv`,
+        ["Rank", "Name", "Type", "Members", "Site", "Model", "IP", "MAC", "Peak Temp (C)", "Avg Temp (C)", "Threshold (C)", "Delta (C)", "Status", "Hottest Member", "Hottest Sensor", "Fans Bad/Total", "PSUs Bad/Total"],
+        rows.map((vc, idx) => [
+          idx + 1, vc.name ?? "", vc.is_vc ? "VC" : "Switch", vc.member_count ?? 1,
+          vc.site_name ?? "", vc.model ?? "", vc.ip ?? "", vc.vc_mac || vc.mac || "",
+          vc.peak_temp_c ?? "", vc.avg_temp_c ?? "", vc.threshold_c ?? "", vc.delta_threshold_c ?? "",
+          vc.above_threshold ? "ALARM" : (vc.alarm_state || "ok"),
+          vc.hottest_member ?? "", vc.hottest_sensor ?? "",
+          `${vc.fans_bad ?? 0}/${vc.fans_total ?? 0}`, `${vc.psus_bad ?? 0}/${vc.psus_total ?? 0}`
+        ])
+      );
+    }
+
     /* Homescreen Charts */
     function renderCharts(data) {
       if (typeof Chart === "undefined") return;
@@ -3272,6 +4183,7 @@
       renderDevicesDownTable();
       renderSitesTable();
       renderSlowApsSection();
+      renderVcTempsSection();
       if (activeTabId === "tab-home") renderCharts(data);
 
       const topAps = data.top_aps || [];

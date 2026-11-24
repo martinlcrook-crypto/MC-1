@@ -61,6 +61,8 @@ ORG_META_CACHE_TTL_SECONDS = int(os.getenv("ORG_META_CACHE_TTL_SECONDS", "86400"
 SITES_CACHE_TTL_SECONDS = int(os.getenv("SITES_CACHE_TTL_SECONDS", "1800"))
 TEMPLATES_CACHE_TTL_SECONDS = int(os.getenv("TEMPLATES_CACHE_TTL_SECONDS", "1800"))
 SLOW_AP_CACHE_TTL_SECONDS = int(os.getenv("SLOW_AP_CACHE_TTL_SECONDS", "1800"))
+VC_TEMP_CACHE_TTL_SECONDS = int(os.getenv("VC_TEMP_CACHE_TTL_SECONDS", "900"))
+VC_TEMP_THRESHOLD_DEFAULT_C = float(os.getenv("VC_TEMP_THRESHOLD_C", "60"))
 MIST_HOURLY_RATE_LIMIT = int(os.getenv("MIST_HOURLY_RATE_LIMIT", "5000"))
 MIN_REFRESH_INTERVAL = 15
 AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "1").strip().lower() not in ("0", "false", "no")
@@ -92,6 +94,44 @@ _switch_info_map_cache: Tuple[float, Dict[str, Dict[str, Any]]] = (0.0, {})
 _slow_aps_cache: Tuple[float, Optional[List[Dict[str, Any]]], str] = (0.0, None, "not_scanned")
 _active_ap_sites_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
 _slow_aps_scan_lock = threading.Lock()
+
+_vc_temps_cache: Tuple[float, Optional[List[Dict[str, Any]]], str] = (0.0, None, "not_scanned")
+_active_switch_sites_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+_vc_temps_scan_lock = threading.Lock()
+_vc_temp_threshold_lock = threading.Lock()
+_VC_TEMP_THRESHOLD_FILE = BASE_DIR / ".vc_temp_threshold"
+
+
+def _load_vc_temp_threshold() -> float:
+    try:
+        if _VC_TEMP_THRESHOLD_FILE.exists():
+            raw = float(_VC_TEMP_THRESHOLD_FILE.read_text(encoding="utf-8").strip())
+            if 25.0 <= raw <= 95.0:
+                return round(raw, 1)
+    except Exception:
+        pass
+    return round(max(25.0, min(95.0, VC_TEMP_THRESHOLD_DEFAULT_C)), 1)
+
+
+_vc_temp_threshold_c: float = _load_vc_temp_threshold()
+
+
+def get_vc_temp_threshold_c() -> float:
+    with _vc_temp_threshold_lock:
+        return _vc_temp_threshold_c
+
+
+def set_vc_temp_threshold_c(val: float) -> float:
+    global _vc_temp_threshold_c
+    clamped = round(max(25.0, min(95.0, float(val))), 1)
+    with _vc_temp_threshold_lock:
+        _vc_temp_threshold_c = clamped
+    try:
+        _VC_TEMP_THRESHOLD_FILE.write_text(f"{clamped}\n", encoding="utf-8")
+    except OSError:
+        pass
+    return clamped
+
 
 _polling_lock = threading.Lock()
 _polling_paused: bool = os.getenv("POLLING_PAUSED_DEFAULT", "").strip().lower() in ("1", "true", "yes")
@@ -166,6 +206,291 @@ def _build_slow_aps_meta(active_ap_sites_count: Optional[int] = None, calls_used
     if calls_used is not None:
         meta["calls_used"] = calls_used
     return meta
+
+
+_BAD_HW_STATUS_TOKENS = (
+    "critical", "crit", "alert", "alarm", "fault", "fail", "failed",
+    "red", "yellow", "warn", "warning", "overheat", "overheating", "high", "bad", "error",
+)
+
+
+def _parse_temp_celsius(val: Any) -> Optional[float]:
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not (-20.0 <= f <= 150.0):
+        return None
+    return round(f, 1)
+
+
+def _is_bad_hw_status(status: Any) -> bool:
+    s = str(status or "").strip().lower()
+    if not s or s in ("ok", "normal", "present", "good", "online", "absent", "not_present", "na", "n/a"):
+        return False
+    return any(tok in s for tok in _BAD_HW_STATUS_TOKENS)
+
+
+def _extract_temps_from_container(container: Any, default_label: str = "Chassis") -> List[Tuple[str, float, bool]]:
+    """Extract (sensor_name, celsius, status_alarm) tuples from Mist temperature lists/dicts/scalars."""
+    readings: List[Tuple[str, float, bool]] = []
+    if isinstance(container, list):
+        for idx, entry in enumerate(container):
+            if isinstance(entry, dict):
+                st = str(entry.get("status") or "").strip().lower()
+                if st in ("absent", "not_present", "empty"):
+                    continue
+                c_val = None
+                for k in ("celsius", "temp", "temperature", "value", "temp_c"):
+                    c_val = _parse_temp_celsius(entry.get(k))
+                    if c_val is not None:
+                        break
+                if c_val is None or (c_val == 0.0 and not st):
+                    continue
+                name = str(entry.get("name") or entry.get("sensor") or entry.get("label") or f"{default_label} Sensor {idx}").strip()
+                readings.append((name, c_val, _is_bad_hw_status(st)))
+            else:
+                c_val = _parse_temp_celsius(entry)
+                if c_val is not None and c_val > 0:
+                    readings.append((f"{default_label} Sensor {idx}", c_val, False))
+    elif isinstance(container, dict):
+        # Single sensor object or map of sensor_name -> celsius
+        direct_val = None
+        for k in ("celsius", "temp", "temperature", "value", "temp_c"):
+            direct_val = _parse_temp_celsius(container.get(k))
+            if direct_val is not None:
+                break
+        if direct_val is not None:
+            st = str(container.get("status") or "").strip().lower()
+            if st not in ("absent", "not_present", "empty"):
+                name = str(container.get("name") or container.get("sensor") or default_label).strip()
+                readings.append((name, direct_val, _is_bad_hw_status(st)))
+        else:
+            for k, v in container.items():
+                if isinstance(v, (dict, list)):
+                    readings.extend(_extract_temps_from_container(v, default_label=str(k)))
+                else:
+                    c_val = _parse_temp_celsius(v)
+                    if c_val is not None and c_val > 0:
+                        readings.append((str(k), c_val, False))
+    else:
+        c_val = _parse_temp_celsius(container)
+        if c_val is not None and c_val > 0:
+            readings.append((default_label, c_val, False))
+    return readings
+
+
+def extract_switch_thermal_info(sw: Dict[str, Any], site_name: str) -> Optional[Dict[str, Any]]:
+    """Extract Virtual Chassis / switch temperature, FPC member breakdown, and fan/PSU health from Mist switch stats."""
+    if not isinstance(sw, dict):
+        return None
+    if str(sw.get("status") or "").lower() != "connected":
+        return None
+
+    module_stat = sw.get("module_stat") if isinstance(sw.get("module_stat"), list) else []
+    vc_setup = sw.get("vc_setup_info") if isinstance(sw.get("vc_setup_info"), dict) else {}
+    vc_mac_raw = str(sw.get("vc_mac") or "").strip()
+
+    all_readings: List[Tuple[str, float, bool, str, Optional[int]]] = []
+    members_summary: List[Dict[str, Any]] = []
+    fans_total = 0
+    fans_bad = 0
+    psus_total = 0
+    psus_bad = 0
+    has_vc_role = False
+
+    for idx, mod in enumerate(module_stat):
+        if not isinstance(mod, dict):
+            continue
+        fpc_raw = mod.get("fpc_idx")
+        fpc_idx = int(fpc_raw) if isinstance(fpc_raw, (int, float)) else idx
+        vc_role = str(mod.get("vc_role") or "").strip().lower()
+        if vc_role:
+            has_vc_role = True
+        member_label = f"FPC {fpc_idx} ({vc_role})" if vc_role else f"FPC {fpc_idx}"
+
+        mod_readings: List[Tuple[str, float, bool]] = []
+        if "temperatures" in mod:
+            mod_readings.extend(_extract_temps_from_container(mod.get("temperatures"), default_label=f"FPC {fpc_idx}"))
+        if not mod_readings:
+            for tk in ("temperature", "temp", "temp_c"):
+                if tk in mod:
+                    mod_readings.extend(_extract_temps_from_container(mod.get(tk), default_label=f"FPC {fpc_idx}"))
+                    if mod_readings:
+                        break
+
+        for s_name, c_val, s_alarm in mod_readings:
+            all_readings.append((s_name, c_val, s_alarm, member_label, fpc_idx))
+
+        if mod_readings:
+            hottest_m = max(mod_readings, key=lambda r: (r[1], int(r[2])))
+            members_summary.append(
+                {
+                    "fpc_idx": fpc_idx,
+                    "vc_role": vc_role or "member",
+                    "model": str(mod.get("model") or sw.get("model") or ""),
+                    "serial": str(mod.get("serial") or ""),
+                    "peak_temp_c": hottest_m[1],
+                    "hottest_sensor": hottest_m[0],
+                    "sensor_alarm": any(r[2] for r in mod_readings),
+                }
+            )
+
+        for fan in (mod.get("fans") if isinstance(mod.get("fans"), list) else []):
+            if not isinstance(fan, dict):
+                continue
+            fst = str(fan.get("status") or "").strip().lower()
+            if fst in ("absent", "not_present", "empty"):
+                continue
+            fans_total += 1
+            if _is_bad_hw_status(fst):
+                fans_bad += 1
+
+        for psu in (mod.get("psus") if isinstance(mod.get("psus"), list) else []):
+            if not isinstance(psu, dict):
+                continue
+            pst = str(psu.get("status") or "").strip().lower()
+            if pst in ("absent", "not_present", "empty"):
+                continue
+            psus_total += 1
+            if _is_bad_hw_status(pst):
+                psus_bad += 1
+
+    # Fallback top-level switch temperature fields if module_stat didn't yield any readings
+    if not all_readings:
+        top_readings: List[Tuple[str, float, bool]] = []
+        for tk in ("temperatures", "env_stat", "temperature", "temp", "temp_c"):
+            if tk in sw and sw.get(tk) is not None:
+                val = sw.get(tk)
+                if tk == "env_stat" and isinstance(val, dict):
+                    top_readings.extend(_extract_temps_from_container(val.get("temperatures") or val, default_label="Chassis"))
+                else:
+                    top_readings.extend(_extract_temps_from_container(val, default_label="Chassis"))
+                if top_readings:
+                    break
+        for s_name, c_val, s_alarm in top_readings:
+            all_readings.append((s_name, c_val, s_alarm, "Chassis", 0))
+
+    if not all_readings:
+        return None
+
+    hottest = max(all_readings, key=lambda r: (r[1], int(r[2])))
+    peak_temp_c = hottest[1]
+    avg_temp_c = round(sum(r[1] for r in all_readings) / len(all_readings), 1)
+    sensor_status_alarm = any(r[2] for r in all_readings)
+
+    is_vc = bool(
+        len(module_stat) > 1
+        or vc_mac_raw
+        or bool(vc_setup)
+        or has_vc_role
+        or sw.get("is_vc") is True
+    )
+    member_count = max(len(module_stat), len(members_summary), 1)
+    members_summary.sort(key=lambda m: (-m["peak_temp_c"], m["fpc_idx"]))
+
+    ip_stat = sw.get("ip_stat") if isinstance(sw.get("ip_stat"), dict) else {}
+    sw_ip = str(sw.get("ip") or ip_stat.get("ip") or "").strip()
+    sw_mac = format_mac(sw.get("mac")) if sw.get("mac") else ""
+    vc_mac = format_mac(vc_mac_raw) if vc_mac_raw else ""
+
+    return {
+        "id": str(sw.get("id") or sw_mac or sw.get("name") or ""),
+        "name": str(sw.get("name") or sw_mac or "Unnamed Switch"),
+        "site_id": str(sw.get("site_id") or ""),
+        "site_name": site_name,
+        "model": str(sw.get("model") or ""),
+        "mac": sw_mac,
+        "vc_mac": vc_mac,
+        "ip": sw_ip,
+        "version": str(sw.get("version") or ""),
+        "is_vc": is_vc,
+        "member_count": member_count,
+        "peak_temp_c": peak_temp_c,
+        "avg_temp_c": avg_temp_c,
+        "hottest_sensor": hottest[0],
+        "hottest_member": hottest[3],
+        "hottest_fpc_idx": hottest[4],
+        "sensor_count": len(all_readings),
+        "sensor_status_alarm": sensor_status_alarm,
+        "fans_total": fans_total,
+        "fans_bad": fans_bad,
+        "psus_total": psus_total,
+        "psus_bad": psus_bad,
+        "members": members_summary,
+        "last_seen": sw.get("last_seen"),
+    }
+
+
+def _build_vc_temps_view(
+    raw_items: Optional[List[Dict[str, Any]]],
+    active_switch_sites_count: Optional[int] = None,
+    calls_used: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Annotate cached thermal switch/VC items against the active threshold and compute summary metadata."""
+    threshold_c = get_vc_temp_threshold_c()
+    warn_c = round(max(20.0, threshold_c - 5.0), 1)
+    with _meta_cache_lock:
+        ts_vc, cached_items, source = _vc_temps_cache
+        _, cached_sw_sites = _active_switch_sites_cache
+    items_src = raw_items if raw_items is not None else (cached_items or [])
+    sites_cnt = active_switch_sites_count if active_switch_sites_count is not None else len(cached_sw_sites)
+    scanned = (raw_items is not None) or (cached_items is not None and source != "not_scanned")
+
+    evaluated: List[Dict[str, Any]] = []
+    for item in items_src:
+        rec = dict(item)
+        peak = float(rec.get("peak_temp_c") or 0.0)
+        sensor_alarm = bool(rec.get("sensor_status_alarm"))
+        above_thresh = (peak >= threshold_c) or sensor_alarm
+        if above_thresh:
+            alarm_state = "alarm"
+        elif peak >= warn_c:
+            alarm_state = "warn"
+        else:
+            alarm_state = "ok"
+        rec["above_threshold"] = above_thresh
+        rec["alarm_state"] = alarm_state
+        rec["delta_threshold_c"] = round(peak - threshold_c, 1)
+        rec["threshold_c"] = threshold_c
+        evaluated.append(rec)
+
+    evaluated.sort(key=lambda x: (-float(x.get("peak_temp_c") or 0.0), -int(bool(x.get("is_vc"))), str(x.get("name") or "").lower()))
+
+    vc_only = [x for x in evaluated if x.get("is_vc")]
+    primary_list = vc_only if vc_only else evaluated
+    alarmed_vcs = [x for x in vc_only if x.get("above_threshold")]
+    alarmed_all = [x for x in evaluated if x.get("above_threshold")]
+    max_temp = primary_list[0]["peak_temp_c"] if primary_list else None
+    avg_temp = round(sum(float(x["peak_temp_c"]) for x in primary_list) / len(primary_list), 1) if primary_list else None
+    hw_faults = sum(int(x.get("fans_bad") or 0) + int(x.get("psus_bad") or 0) for x in primary_list)
+
+    now = time.time()
+    age = int(max(0.0, now - ts_vc)) if scanned and ts_vc > 0 else None
+    meta: Dict[str, Any] = {
+        "scanned": scanned,
+        "source": source if scanned else "not_scanned",
+        "scanned_at": datetime.fromtimestamp(ts_vc, tz=timezone.utc).isoformat() if scanned and ts_vc > 0 else None,
+        "cache_age_seconds": age,
+        "threshold_c": threshold_c,
+        "warn_c": warn_c,
+        "vc_count": len(vc_only),
+        "switch_count": len(evaluated),
+        "alarmed_vcs_count": len(alarmed_vcs),
+        "alarmed_all_count": len(alarmed_all),
+        "alarmed_count": len(alarmed_vcs) if vc_only else len(alarmed_all),
+        "max_temp_c": max_temp,
+        "avg_temp_c": avg_temp,
+        "hw_faults_count": hw_faults,
+        "active_switch_sites_count": sites_cnt,
+        "estimated_calls": max(1, sites_cnt) if sites_cnt > 0 else 1,
+        "cache_ttl_seconds": VC_TEMP_CACHE_TTL_SECONDS,
+    }
+    if calls_used is not None:
+        meta["calls_used"] = calls_used
+    return evaluated, meta
 
 
 def _record_mist_api_call() -> None:
@@ -645,8 +970,58 @@ def deduplicate_org_clients(
     return deduped
 
 
+def _scan_vc_temps_from_sites(
+    session: requests.Session,
+    active_switch_sites: List[Dict[str, Any]],
+    rate_limit_flag: threading.Event,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Per-site switch/VC thermal scan used on-demand when org-wide switch stats omit module_stat/temperatures."""
+    items: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    def fetch_one(site: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        if rate_limit_flag.is_set():
+            return [], None
+        site_id = site.get("id", "")
+        site_name = site.get("name", site_id)
+        try:
+            switches = mist_get_paginated(
+                session,
+                f"/api/v1/sites/{site_id}/stats/devices",
+                params={"type": "switch"},
+                limit=1000,
+                send_page_params=True,
+                dedup_keys=("mac", "id"),
+            )
+        except MistRateLimitError:
+            rate_limit_flag.set()
+            raise
+        except Exception as exc:
+            return [], f"Switch thermal scan failed for {site_name}: {exc}"
+
+        found: List[Dict[str, Any]] = []
+        for sw in switches:
+            info = extract_switch_thermal_info(sw, site_name)
+            if info is not None:
+                found.append(info)
+        return found, None
+
+    if not active_switch_sites:
+        return items, warnings
+
+    with ThreadPoolExecutor(max_workers=min(6, len(active_switch_sites))) as pool:
+        futures = [pool.submit(fetch_one, site) for site in active_switch_sites]
+        for fut in as_completed(futures):
+            found, warn = fut.result()
+            items.extend(found)
+            if warn:
+                warnings.append(warn)
+
+    return items, warnings
+
+
 def collect_mist_snapshot() -> Dict[str, Any]:
-    global _last_snapshot_call_count, _switch_info_map_cache, _slow_aps_cache, _active_ap_sites_cache
+    global _last_snapshot_call_count, _switch_info_map_cache, _slow_aps_cache, _active_ap_sites_cache, _vc_temps_cache, _active_switch_sites_cache
     if not MIST_ORG_ID or not MIST_API_TOKEN:
         raise ValueError("MIST_ORG_ID and MIST_API_TOKEN must be configured in environment variables.")
 
@@ -722,6 +1097,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         switches_offline = 0
         offline_switches: List[Dict[str, Any]] = []
         switch_info_map: Dict[str, Dict[str, Any]] = {}
+        active_switch_site_ids = set()
+        org_switch_thermals: List[Dict[str, Any]] = []
         try:
             raw_switches = mist_get_paginated(
                 session,
@@ -733,6 +1110,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             )
             for sw in raw_switches:
                 sid = str(sw.get("site_id") or "")
+                site_name = sw.get("site_name") or site_map.get(sid, {}).get("name", "Unassigned")
                 ip_stat = sw.get("ip_stat") if isinstance(sw.get("ip_stat"), dict) else {}
                 sw_ip = str(sw.get("ip") or ip_stat.get("ip") or "").strip()
                 smac = normalize_mac(sw.get("mac"))
@@ -746,13 +1124,18 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 status = str(sw.get("status") or "").lower()
                 if status == "connected":
                     switches_online += 1
+                    if sid in site_map:
+                        active_switch_site_ids.add(sid)
+                    t_info = extract_switch_thermal_info(sw, site_name)
+                    if t_info is not None:
+                        org_switch_thermals.append(t_info)
                     continue
                 switches_offline += 1
                 offline_switches.append(
                     {
                         "device_type": "Switch",
                         "name": sw.get("name") or sw.get("mac", "Unnamed Switch"),
-                        "site_name": sw.get("site_name") or site_map.get(sid, {}).get("name", "Unassigned"),
+                        "site_name": site_name,
                         "model": sw.get("model", ""),
                         "mac": sw.get("mac", ""),
                         "ip": sw_ip,
@@ -761,9 +1144,13 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                         "status": status or "disconnected",
                     }
                 )
-            if switch_info_map:
-                with _meta_cache_lock:
+            active_switch_sites = [site_map[sid] for sid in active_switch_site_ids if sid in site_map]
+            with _meta_cache_lock:
+                if switch_info_map:
                     _switch_info_map_cache = (time.time(), switch_info_map)
+                _active_switch_sites_cache = (time.time(), list(active_switch_sites))
+                if org_switch_thermals:
+                    _vc_temps_cache = (time.time(), list(org_switch_thermals), "org_stats")
         except MistRateLimitError:
             raise
         except Exception as exc:
@@ -1018,10 +1405,13 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             "devices_down": devices_down,
             "slow_aps": slow_aps,
             "slow_aps_meta": slow_aps_meta,
+            "vc_temps": [],
+            "vc_temps_meta": _build_vc_temps_view(None)[1],
             "estimates": {
                 "traffic_all_sites_calls": max(1, traffic_active_sites_count),
                 "traffic_single_site_calls": 1,
                 "slow_aps_scan_calls": slow_aps_meta["estimated_calls"],
+                "vc_temps_scan_calls": _build_vc_temps_view(None)[1]["estimated_calls"],
                 "nac_rejects_min_calls": 4,
                 "nac_rejects_max_calls": 12,
             },
@@ -1414,19 +1804,28 @@ def health():
 
 
 def _attach_live_stats_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure cached/fresh /api/stats payloads reflect latest polling state, quota, and slow AP scan cache."""
+    """Ensure cached/fresh /api/stats payloads reflect latest polling state, quota, slow AP scan, and VC thermal cache."""
     with _meta_cache_lock:
         _, items_slow, source_slow = _slow_aps_cache
     slow_meta = _build_slow_aps_meta()
     payload["slow_aps_meta"] = slow_meta
+    summary = dict(payload.get("summary") or {})
     if items_slow is not None and source_slow != "not_scanned":
         payload["slow_aps"] = list(items_slow)
-        summary = dict(payload.get("summary") or {})
         summary["slow_aps_count"] = len(items_slow)
         summary["slow_aps_scanned"] = True
-        payload["summary"] = summary
+
+    vc_evaluated, vc_meta = _build_vc_temps_view(None)
+    payload["vc_temps"] = vc_evaluated
+    payload["vc_temps_meta"] = vc_meta
+    summary["vc_temps_scanned"] = vc_meta["scanned"]
+    summary["vc_temp_alarms_count"] = vc_meta["alarmed_count"] if vc_meta["scanned"] else None
+    summary["vc_max_temp_c"] = vc_meta["max_temp_c"]
+    payload["summary"] = summary
+
     estimates = dict(payload.get("estimates") or {})
     estimates["slow_aps_scan_calls"] = slow_meta["estimated_calls"]
+    estimates["vc_temps_scan_calls"] = vc_meta["estimated_calls"]
     payload["estimates"] = estimates
     payload["polling"] = get_polling_state()
     payload["api_quota"] = get_mist_api_quota_snapshot()
@@ -1692,6 +2091,142 @@ def api_slow_aps_scan():
             "calls_used": calls_used,
             "warnings": warnings,
             "api_quota": get_mist_api_quota_snapshot(),
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/vc-temps/scan")
+def api_vc_temps_scan():
+    global _vc_temps_cache, _active_switch_sites_cache
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    payload = request.get_json(silent=True) or {}
+    force_scan = bool(payload.get("force", True))
+
+    with _vc_temps_scan_lock:
+        now = time.time()
+        with _meta_cache_lock:
+            ts_vc, items_vc, source_vc = _vc_temps_cache
+            _, cached_sw_sites = _active_switch_sites_cache
+        age = now - ts_vc if ts_vc > 0 else 1e9
+        if items_vc is not None and source_vc != "not_scanned" and (
+            (not force_scan and age < VC_TEMP_CACHE_TTL_SECONDS)
+            or (force_scan and age < MIN_REFRESH_INTERVAL)
+        ):
+            evaluated, meta = _build_vc_temps_view(items_vc, calls_used=0)
+            resp = jsonify(
+                {
+                    "vc_temps": evaluated,
+                    "vc_temps_meta": meta,
+                    "cached": True,
+                    "calls_used": 0,
+                    "warnings": [],
+                    "api_quota": get_mist_api_quota_snapshot(),
+                }
+            )
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+
+        session = _new_mist_session()
+        rate_limit_flag = threading.Event()
+        warnings: List[str] = []
+        thermals: List[Dict[str, Any]] = []
+        source_label = "on_demand"
+
+        try:
+            active_sw_sites = list(cached_sw_sites)
+            if not active_sw_sites or source_vc == "org_stats":
+                sites_raw = _get_sites_raw_cached(session)
+                site_map = {s["id"]: s for s in sites_raw if isinstance(s, dict) and s.get("id")}
+                raw_switches = mist_get_paginated(
+                    session,
+                    f"/api/v1/orgs/{MIST_ORG_ID}/stats/devices",
+                    params={"type": "switch", "status": "connected"},
+                    limit=1000,
+                    send_page_params=True,
+                    dedup_keys=("mac", "id"),
+                )
+                active_ids = set()
+                for sw in raw_switches:
+                    if not isinstance(sw, dict):
+                        continue
+                    sid = str(sw.get("site_id") or "")
+                    if sid in site_map:
+                        active_ids.add(sid)
+                    sname = sw.get("site_name") or site_map.get(sid, {}).get("name", "Unassigned")
+                    info = extract_switch_thermal_info(sw, sname)
+                    if info is not None:
+                        thermals.append(info)
+                active_sw_sites = [site_map[sid] for sid in active_ids if sid in site_map]
+                with _meta_cache_lock:
+                    _active_switch_sites_cache = (time.time(), list(active_sw_sites))
+                if thermals:
+                    source_label = "org_stats"
+                elif active_sw_sites:
+                    thermals, warnings = _scan_vc_temps_from_sites(session, active_sw_sites, rate_limit_flag)
+            else:
+                thermals, warnings = _scan_vc_temps_from_sites(session, active_sw_sites, rate_limit_flag)
+        except MistRateLimitError as exc:
+            return jsonify({"error": str(exc), "api_quota": get_mist_api_quota_snapshot()}), 429
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 502
+            return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
+        except Exception as exc:
+            return jsonify({"error": f"Failed to scan Virtual Chassis temperatures: {exc}"}), 502
+        finally:
+            calls_used = session.call_count
+            session.close()
+
+        with _meta_cache_lock:
+            _vc_temps_cache = (time.time(), list(thermals), source_label)
+            active_cnt = len(_active_switch_sites_cache[1]) or len(active_sw_sites)
+
+        evaluated, meta = _build_vc_temps_view(
+            thermals,
+            active_switch_sites_count=active_cnt,
+            calls_used=calls_used,
+        )
+
+    resp = jsonify(
+        {
+            "vc_temps": evaluated,
+            "vc_temps_meta": meta,
+            "cached": False,
+            "calls_used": calls_used,
+            "warnings": warnings,
+            "api_quota": get_mist_api_quota_snapshot(),
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/vc-temps/threshold")
+def api_vc_temps_threshold():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+
+    payload = request.get_json(silent=True) or {}
+    raw_val = payload.get("threshold_c")
+    try:
+        val = float(raw_val)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Provide a valid numeric 'threshold_c' between 25 and 95 °C."}), 400
+    if not (25.0 <= val <= 95.0):
+        return jsonify({"error": "Temperature threshold must be between 25°C and 95°C."}), 400
+
+    updated = set_vc_temp_threshold_c(val)
+    evaluated, meta = _build_vc_temps_view(None)
+    resp = jsonify(
+        {
+            "threshold_c": updated,
+            "vc_temps": evaluated,
+            "vc_temps_meta": meta,
         }
     )
     resp.headers["Cache-Control"] = "no-store"

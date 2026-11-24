@@ -9,3 +9,4 @@ app.pid
 history.db
 history.db-wal
 history.db-shm
+.vc_temp_threshold

@@ -3,191 +3,557 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sign In — Mist EU Wireless Dashboard</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=1" />
-  <link rel="icon" type="image/x-icon" href="/favicon.ico?v=1" />
+  <meta name="description" content="Sign in to the Mist EU Wireless &amp; eduroam Telemetry Dashboard using your Juniper Mist organisation credentials." />
+  <title>Sign In — Mist EU Telemetry Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2" />
+  <link rel="icon" type="image/x-icon" href="/favicon.ico?v=2" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #0b1120; --panel: #111a2e; --panel-alt: #16223b; --border: #233354;
-      --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8; --eduroam: #818cf8;
-      --green: #34d399; --amber: #fbbf24; --red: #f87171;
+      --bg-canvas: #06090f;
+      --bg-surface: #0c1320;
+      --bg-surface-2: #121c2f;
+      --bg-input: #080d17;
+      --border-subtle: rgba(148, 163, 184, 0.14);
+      --border-strong: rgba(148, 163, 184, 0.26);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --mist-cyan: #38bdf8;
+      --mist-blue: #0ea5e9;
+      --mist-lime: #84bd00;
+      --green: #34d399;
+      --amber: #fbbf24;
+      --red: #f87171;
+      --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
     }
+
     * { box-sizing: border-box; }
+
     body {
       margin: 0;
       min-height: 100vh;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 20px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: radial-gradient(circle at top, #13203b 0%, var(--bg) 60%);
-      color: var(--text);
-      line-height: 1.45;
+      padding: 24px 18px;
+      font-family: var(--font-sans);
+      color: var(--text-primary);
+      background-color: var(--bg-canvas);
+      background-image:
+        radial-gradient(ellipse 70% 55% at 20% 0%, rgba(14, 165, 233, 0.14) 0%, transparent 65%),
+        radial-gradient(ellipse 60% 45% at 85% 100%, rgba(132, 189, 0, 0.08) 0%, transparent 60%);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
-    .card {
+
+    .auth-shell {
       width: 100%;
-      max-width: 420px;
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 30px 28px 26px;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+      max-width: 448px;
+      animation: cardReveal 440ms var(--ease-out) both;
     }
-    .badge-row {
+
+    .card {
+      position: relative;
+      background: linear-gradient(180deg, rgba(16, 24, 40, 0.96) 0%, rgba(11, 17, 29, 0.98) 100%);
+      border: 1px solid var(--border-subtle);
+      border-radius: 18px;
+      padding: 32px 30px 26px;
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 28px 64px -16px rgba(0, 0, 0, 0.65),
+        0 0 0 1px rgba(6, 9, 15, 0.6);
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent 0%, var(--mist-cyan) 35%, var(--mist-lime) 75%, transparent 100%);
+      opacity: 0.7;
+    }
+
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+
+    .emblem-wrap {
+      flex-shrink: 0;
+      width: 46px;
+      height: 46px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 12px;
+      filter: drop-shadow(0 6px 14px rgba(14, 165, 233, 0.22));
+    }
+
+    .brand-text {
+      min-width: 0;
+    }
+
+    .brand-kicker {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--mist-cyan);
+      margin-bottom: 2px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 1.38rem;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+      color: var(--text-primary);
+      line-height: 1.2;
+    }
+
+    .meta-strip {
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-bottom: 14px;
       flex-wrap: wrap;
+      margin-bottom: 18px;
     }
-    .badge {
+
+    .chip {
       display: inline-flex;
       align-items: center;
-      font-size: 0.72rem;
-      font-weight: 600;
-      padding: 3px 10px;
+      gap: 6px;
+      font-family: var(--font-mono);
+      font-size: 0.71rem;
+      font-weight: 500;
+      padding: 4px 10px;
       border-radius: 999px;
-      border: 1px solid var(--border);
-      background: var(--panel-alt);
+      border: 1px solid var(--border-subtle);
+      background: rgba(18, 28, 47, 0.75);
+      color: var(--text-secondary);
     }
-    .badge.region { color: var(--accent); border-color: rgba(56, 189, 248, 0.35); }
-    .badge.readonly { color: var(--green); border-color: rgba(52, 211, 153, 0.35); }
-    h1 {
-      margin: 0 0 6px;
-      font-size: 1.4rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
+
+    .chip.region {
+      color: var(--mist-cyan);
+      border-color: rgba(56, 189, 248, 0.28);
+      background: rgba(56, 189, 248, 0.08);
     }
+
+    .chip.readonly {
+      color: var(--green);
+      border-color: rgba(52, 211, 153, 0.28);
+      background: rgba(52, 211, 153, 0.08);
+    }
+
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .step-indicator {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 4px;
+      border-radius: 10px;
+      background: rgba(8, 13, 23, 0.75);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .step-pill {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 7px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      transition: background 220ms var(--ease-out), color 220ms var(--ease-out);
+    }
+
+    .step-pill .step-num {
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      opacity: 0.8;
+    }
+
+    .step-pill.active {
+      background: rgba(56, 189, 248, 0.14);
+      color: var(--mist-cyan);
+    }
+
+    .step-pill.done {
+      color: var(--green);
+    }
+
     .subtitle {
-      margin: 0 0 22px;
-      color: var(--muted);
-      font-size: 0.88rem;
+      margin: 0 0 20px;
+      color: var(--text-secondary);
+      font-size: 0.87rem;
+      line-height: 1.5;
     }
+
     .http-warn {
       display: none;
-      background: rgba(251, 191, 36, 0.12);
-      border: 1px solid rgba(251, 191, 36, 0.4);
+      background: rgba(251, 191, 36, 0.1);
+      border: 1px solid rgba(251, 191, 36, 0.32);
       color: #fde68a;
       padding: 10px 12px;
       border-radius: 10px;
       font-size: 0.8rem;
       margin-bottom: 16px;
+      line-height: 1.45;
     }
+
     .error-box {
       display: none;
-      background: rgba(248, 113, 113, 0.12);
-      border: 1px solid rgba(248, 113, 113, 0.45);
+      background: rgba(248, 113, 113, 0.1);
+      border: 1px solid rgba(248, 113, 113, 0.36);
       color: #fecaca;
-      padding: 10px 12px;
+      padding: 10px 13px;
       border-radius: 10px;
-      font-size: 0.85rem;
+      font-size: 0.84rem;
+      margin-bottom: 16px;
+      line-height: 1.45;
+    }
+
+    .error-box.shake {
+      animation: shakeX 320ms var(--ease-out);
+    }
+
+    .field {
       margin-bottom: 16px;
     }
-    .field { margin-bottom: 16px; }
+
     label {
       display: block;
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--muted);
+      font-size: 0.73rem;
+      font-weight: 700;
+      color: var(--text-secondary);
       margin-bottom: 6px;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.06em;
     }
+
+    .input-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+
     input {
       width: 100%;
-      background: var(--bg);
-      color: var(--text);
-      border: 1px solid var(--border);
+      background: var(--bg-input);
+      color: var(--text-primary);
+      border: 1px solid var(--border-subtle);
       border-radius: 10px;
-      padding: 11px 13px;
-      font-size: 0.95rem;
-      transition: border-color 0.15s;
+      padding: 11px 14px;
+      font-family: var(--font-sans);
+      font-size: 0.94rem;
+      transition: border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out), background 180ms var(--ease-out);
     }
-    input:focus { outline: none; border-color: var(--accent); }
+
+    input::placeholder {
+      color: var(--text-muted);
+    }
+
+    input:hover {
+      border-color: var(--border-strong);
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--mist-cyan);
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
+      background: #0a101d;
+    }
+
+    .input-wrap.has-toggle input {
+      padding-right: 44px;
+    }
+
+    .pw-toggle {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      border-radius: 7px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: color 150ms, background 150ms;
+    }
+
+    .pw-toggle:hover {
+      color: var(--text-primary);
+      background: rgba(148, 163, 184, 0.1);
+    }
+
     .otp-input {
-      font-size: 1.35rem;
-      letter-spacing: 0.25em;
+      font-family: var(--font-mono);
+      font-size: 1.45rem;
+      font-weight: 600;
+      letter-spacing: 0.34em;
       text-align: center;
       font-variant-numeric: tabular-nums;
+      padding: 13px 14px;
     }
-    button {
+
+    button.btn-primary {
       width: 100%;
-      background: var(--accent);
-      color: #08101e;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      background: linear-gradient(180deg, #38bdf8 0%, #0ea5e9 100%);
+      color: #05111e;
       border: none;
       border-radius: 10px;
-      padding: 11px 16px;
+      padding: 12px 16px;
+      font-family: var(--font-sans);
       font-weight: 700;
-      font-size: 0.94rem;
+      font-size: 0.93rem;
+      letter-spacing: -0.01em;
       cursor: pointer;
-      transition: opacity 0.15s;
+      box-shadow: 0 8px 22px -6px rgba(14, 165, 233, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+      transition: transform 150ms var(--ease-out), box-shadow 180ms var(--ease-out), filter 180ms var(--ease-out), opacity 180ms;
     }
-    button:hover { opacity: 0.92; }
-    button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    button.btn-primary:hover:not(:disabled) {
+      filter: brightness(1.06);
+      transform: translateY(-1px);
+      box-shadow: 0 12px 26px -6px rgba(14, 165, 233, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    }
+
+    button.btn-primary:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    button.btn-primary:disabled {
+      opacity: 0.65;
+      cursor: not-allowed;
+      transform: none;
+    }
+
     button.btn-link {
+      width: 100%;
       margin-top: 10px;
       background: transparent;
-      color: var(--muted);
-      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      font-family: var(--font-sans);
       font-weight: 600;
-      font-size: 0.85rem;
-      padding: 9px 14px;
+      font-size: 0.84rem;
+      padding: 10px 14px;
+      cursor: pointer;
+      transition: color 150ms, border-color 150ms, background 150ms;
     }
-    button.btn-link:hover { color: var(--text); border-color: var(--accent); opacity: 1; }
-    .step { display: none; }
-    .step.active { display: block; }
+
+    button.btn-link:hover {
+      color: var(--text-primary);
+      border-color: var(--border-strong);
+      background: rgba(148, 163, 184, 0.06);
+    }
+
+    .step {
+      display: none;
+    }
+
+    .step.active {
+      display: block;
+      animation: stepEnter 260ms var(--ease-out) both;
+    }
+
+    .spinner {
+      width: 15px;
+      height: 15px;
+      border-radius: 50%;
+      border: 2px solid rgba(5, 17, 30, 0.25);
+      border-top-color: #05111e;
+      animation: spin 680ms linear infinite;
+      display: inline-block;
+    }
+
     .foot-note {
-      margin-top: 18px;
-      padding-top: 14px;
-      border-top: 1px solid var(--border);
-      font-size: 0.78rem;
-      color: var(--muted);
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border-subtle);
+      font-size: 0.77rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+      display: flex;
+      gap: 9px;
+      align-items: flex-start;
+    }
+
+    .foot-note svg {
+      flex-shrink: 0;
+      margin-top: 2px;
+      color: var(--mist-cyan);
+      opacity: 0.8;
+    }
+
+    .foot-note code {
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      color: var(--text-secondary);
+      background: rgba(148, 163, 184, 0.08);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    @keyframes cardReveal {
+      from { opacity: 0; transform: translateY(14px) scale(0.985); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes stepEnter {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes shakeX {
+      0%, 100% { transform: translateX(0); }
+      22% { transform: translateX(-6px); }
+      45% { transform: translateX(5px); }
+      70% { transform: translateX(-3px); }
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
     }
   </style>
 </head>
 <body>
-  <div class="card">
-    <div class="badge-row">
-      <span class="badge region">Mist EU Auth</span>
-      <span class="badge readonly">Authorised Org Users Only</span>
-    </div>
-    <h1>Mist Wireless Dashboard</h1>
-    <p class="subtitle">Sign in with your Juniper Mist email and password. Access is verified against your Mist organisation privileges.</p>
-
-    <div id="httpWarn" class="http-warn">
-      Connection is currently over plain HTTP. Enable HTTPS (port 443) before entering credentials over untrusted networks.
-    </div>
-    <div id="errorBox" class="error-box"></div>
-
-    <!-- Step 1: Mist Email & Password -->
-    <form id="loginForm" class="step active" onsubmit="handleLogin(event)">
-      <div class="field">
-        <label for="email">Mist Email</label>
-        <input id="email" name="email" type="email" autocomplete="username" required placeholder="name@port.ac.uk" />
+  <main class="auth-shell">
+    <section class="card" aria-label="Mist Authentication">
+      <div class="brand-lockup">
+        <div class="emblem-wrap" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="46" height="46">
+            <defs>
+              <linearGradient id="loginBgGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#0f2544" />
+                <stop offset="100%" stop-color="#081121" />
+              </linearGradient>
+              <linearGradient id="loginBorderGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#38bdf8" />
+                <stop offset="55%" stop-color="#0099da" />
+                <stop offset="100%" stop-color="#84bd00" />
+              </linearGradient>
+              <linearGradient id="loginMcGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#f0f9ff" />
+                <stop offset="55%" stop-color="#38bdf8" />
+                <stop offset="100%" stop-color="#2dd4bf" />
+              </linearGradient>
+            </defs>
+            <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#loginBgGrad)" stroke="url(#loginBorderGrad)" stroke-width="3" />
+            <path d="M 23 14.5 Q 32 9 41 14.5" fill="none" stroke="#84bd00" stroke-width="2.6" stroke-linecap="round" opacity="0.95" />
+            <circle cx="32" cy="17.2" r="2" fill="#34d399" />
+            <path d="M 11.5 48.5 L 11.5 24.5 L 21.5 38.5 L 31.5 24.5 L 31.5 48.5" fill="none" stroke="url(#loginMcGrad)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M 52.5 28.5 C 50 24.8 46.2 23.8 43 25 C 39.2 26.5 37.8 31 37.8 36.5 C 37.8 42 39.2 46.5 43 48 C 46.2 49.2 50 48.2 52.5 44.5" fill="none" stroke="url(#loginMcGrad)" stroke-width="5.2" stroke-linecap="round" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <div class="brand-kicker">Mist Telemetry · Obsidian</div>
+          <h1>Mist Wireless Dashboard</h1>
+        </div>
       </div>
-      <div class="field">
-        <label for="password">Mist Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your Mist password" />
-      </div>
-      <button id="loginBtn" type="submit">Sign In with Mist</button>
-    </form>
 
-    <!-- Step 2: Mist 2FA Code -->
-    <form id="twoFactorForm" class="step" onsubmit="handleTwoFactor(event)">
-      <p class="subtitle" id="twoFactorHint" style="margin-bottom:14px;">Enter the 6-digit verification code from your authenticator app.</p>
-      <div class="field">
-        <label for="twoFactorCode">2FA Verification Code</label>
-        <input id="twoFactorCode" name="two_factor" type="text" inputmode="numeric" pattern="[0-9A-Za-z -]{4,12}" autocomplete="one-time-code" required placeholder="123456" class="otp-input" />
+      <div class="meta-strip">
+        <span class="chip region"><span class="dot"></span>api.eu.mist.com</span>
+        <span class="chip readonly"><span class="dot"></span>Authorised Org Users</span>
       </div>
-      <button id="twoFactorBtn" type="submit">Verify &amp; Continue</button>
-      <button type="button" class="btn-link" onclick="resetToLogin()">Back to Email &amp; Password</button>
-    </form>
 
-    <div class="foot-note">
-      Your Mist password is sent directly to <code>api.eu.mist.com</code> only to verify your identity and organisation membership; it is never stored on this server.
-    </div>
-  </div>
+      <div class="step-indicator" aria-label="Authentication steps">
+        <div id="stepPill1" class="step-pill active"><span class="step-num">01</span> Credentials</div>
+        <div id="stepPill2" class="step-pill"><span class="step-num">02</span> 2FA Verify</div>
+      </div>
+
+      <p class="subtitle" id="authSubtitle">Sign in with your Juniper Mist email and password. Access is verified directly against your Mist organisation privileges.</p>
+
+      <div id="httpWarn" class="http-warn" role="alert">
+        Connection is currently over plain HTTP. Enable HTTPS (port 443) before entering credentials over untrusted networks.
+      </div>
+      <div id="errorBox" class="error-box" role="alert"></div>
+
+      <!-- Step 1: Mist Email & Password -->
+      <form id="loginForm" class="step active" onsubmit="handleLogin(event)">
+        <div class="field">
+          <label for="email">Mist Email</label>
+          <div class="input-wrap">
+            <input id="email" name="email" type="email" autocomplete="username" required placeholder="name@port.ac.uk" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="password">Mist Password</label>
+          <div class="input-wrap has-toggle">
+            <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="Enter your Mist password" />
+            <button type="button" id="togglePwBtn" class="pw-toggle" aria-label="Show password" onclick="togglePasswordVisibility()">
+              <svg id="pwEyeIcon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <button id="loginBtn" class="btn-primary" type="submit">
+          <span>Sign In with Mist</span>
+        </button>
+      </form>
+
+      <!-- Step 2: Mist 2FA Code -->
+      <form id="twoFactorForm" class="step" onsubmit="handleTwoFactor(event)">
+        <p class="subtitle" id="twoFactorHint" style="margin-bottom:16px;">Enter the 6-digit verification code from your authenticator app.</p>
+        <div class="field">
+          <label for="twoFactorCode">2FA Verification Code</label>
+          <div class="input-wrap">
+            <input id="twoFactorCode" name="two_factor" type="text" inputmode="numeric" pattern="[0-9A-Za-z -]{4,12}" autocomplete="one-time-code" required placeholder="000000" class="otp-input" />
+          </div>
+        </div>
+        <button id="twoFactorBtn" class="btn-primary" type="submit">
+          <span>Verify &amp; Continue</span>
+        </button>
+        <button type="button" class="btn-link" onclick="resetToLogin()">&larr; Back to Email &amp; Password</button>
+      </form>
+
+      <div class="foot-note">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+        <span>Your Mist password is sent directly to <code>api.eu.mist.com</code> only to verify your identity and organisation membership; it is never stored on this server.</span>
+      </div>
+    </section>
+  </main>
 
   <script>
     let pendingChallengeId = null;
@@ -196,20 +562,53 @@
       document.getElementById("httpWarn").style.display = "block";
     }
 
+    function togglePasswordVisibility() {
+      const inp = document.getElementById("password");
+      const btn = document.getElementById("togglePwBtn");
+      const icon = document.getElementById("pwEyeIcon");
+      if (!inp) return;
+      const isHidden = inp.type === "password";
+      inp.type = isHidden ? "text" : "password";
+      btn.setAttribute("aria-label", isHidden ? "Hide password" : "Show password");
+      icon.innerHTML = isHidden
+        ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>'
+        : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+    }
+
+    function setStepIndicator(stepNum) {
+      const p1 = document.getElementById("stepPill1");
+      const p2 = document.getElementById("stepPill2");
+      const sub = document.getElementById("authSubtitle");
+      if (stepNum === 2) {
+        p1.className = "step-pill done";
+        p2.className = "step-pill active";
+        if (sub) sub.style.display = "none";
+      } else {
+        p1.className = "step-pill active";
+        p2.className = "step-pill";
+        if (sub) sub.style.display = "block";
+      }
+    }
+
     function showError(msg) {
       const box = document.getElementById("errorBox");
       if (!msg) {
         box.style.display = "none";
+        box.classList.remove("shake");
         box.textContent = "";
       } else {
         box.textContent = msg;
         box.style.display = "block";
+        box.classList.remove("shake");
+        void box.offsetWidth;
+        box.classList.add("shake");
       }
     }
 
     function resetToLogin() {
       pendingChallengeId = null;
       showError("");
+      setStepIndicator(1);
       document.getElementById("twoFactorCode").value = "";
       document.getElementById("twoFactorForm").classList.remove("active");
       document.getElementById("loginForm").classList.add("active");
@@ -224,7 +623,7 @@
       const email = document.getElementById("email").value.trim();
       const password = document.getElementById("password").value;
       btn.disabled = true;
-      btn.textContent = "Verifying with Mist...";
+      btn.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Verifying with Mist...</span>';
 
       try {
         const res = await fetch("/api/auth/login", {
@@ -240,6 +639,7 @@
           pendingChallengeId = data.challenge_id;
           document.getElementById("twoFactorHint").textContent =
             `Two-factor authentication is enabled for ${data.email || email}. Enter your verification code.`;
+          setStepIndicator(2);
           document.getElementById("loginForm").classList.remove("active");
           document.getElementById("twoFactorForm").classList.add("active");
           document.getElementById("twoFactorCode").focus();
@@ -250,7 +650,7 @@
         showError(err.message);
       } finally {
         btn.disabled = false;
-        btn.textContent = "Sign In with Mist";
+        btn.innerHTML = '<span>Sign In with Mist</span>';
       }
     }
 
@@ -264,7 +664,7 @@
       const btn = document.getElementById("twoFactorBtn");
       const code = document.getElementById("twoFactorCode").value.trim().replace(/\s+/g, "");
       btn.disabled = true;
-      btn.textContent = "Verifying Code...";
+      btn.innerHTML = '<span class="spinner" aria-hidden="true"></span><span>Verifying Code...</span>';
 
       try {
         const res = await fetch("/api/auth/two-factor", {
@@ -284,7 +684,7 @@
         showError(err.message);
       } finally {
         btn.disabled = false;
-        btn.textContent = "Verify & Continue";
+        btn.innerHTML = '<span>Verify &amp; Continue</span>';
       }
     }
   </script>

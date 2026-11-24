@@ -89,7 +89,15 @@ _org_info_cache: Tuple[float, Optional[Dict[str, Any]]] = (0.0, None)
 _sites_raw_cache: Tuple[float, Optional[List[Dict[str, Any]]]] = (0.0, None)
 _templates_cache: Tuple[float, Optional[List[Dict[str, Any]]]] = (0.0, None)
 _switch_info_map_cache: Tuple[float, Dict[str, Dict[str, Any]]] = (0.0, {})
-_slow_aps_cache: Tuple[float, Optional[List[Dict[str, Any]]]] = (0.0, None)
+_slow_aps_cache: Tuple[float, Optional[List[Dict[str, Any]]], str] = (0.0, None, "not_scanned")
+_active_ap_sites_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+_slow_aps_scan_lock = threading.Lock()
+
+_polling_lock = threading.Lock()
+_polling_paused: bool = os.getenv("POLLING_PAUSED_DEFAULT", "").strip().lower() in ("1", "true", "yes")
+_polling_paused_at: Optional[float] = time.time() if _polling_paused else None
+_polling_paused_by: Optional[str] = "environment" if _polling_paused else None
+_polling_wake_event = threading.Event()
 
 _quota_lock = threading.Lock()
 _mist_call_timestamps: deque = deque()
@@ -102,6 +110,62 @@ LOGIN_RATE_WINDOW_SECONDS = 300
 LOGIN_RATE_MAX_ATTEMPTS = 15
 TWO_FACTOR_CHALLENGE_TTL_SECONDS = 300
 TWO_FACTOR_MAX_ATTEMPTS = 5
+
+
+def _is_polling_paused() -> bool:
+    with _polling_lock:
+        return _polling_paused
+
+
+def get_polling_state() -> Dict[str, Any]:
+    with _polling_lock:
+        paused = _polling_paused
+        paused_at = _polling_paused_at
+        paused_by = _polling_paused_by
+    return {
+        "paused": paused,
+        "status": "paused" if paused else "active",
+        "paused_at": datetime.fromtimestamp(paused_at, tz=timezone.utc).isoformat() if paused_at else None,
+        "paused_by": paused_by,
+        "interval_seconds": HISTORY_SAMPLE_INTERVAL_SECONDS,
+    }
+
+
+def set_polling_paused(paused: bool, actor: Optional[str] = None) -> Dict[str, Any]:
+    global _polling_paused, _polling_paused_at, _polling_paused_by
+    with _polling_lock:
+        _polling_paused = bool(paused)
+        if _polling_paused:
+            _polling_paused_at = time.time()
+            _polling_paused_by = actor or "operator"
+        else:
+            _polling_paused_at = None
+            _polling_paused_by = None
+    if not paused:
+        _polling_wake_event.set()
+    return get_polling_state()
+
+
+def _build_slow_aps_meta(active_ap_sites_count: Optional[int] = None, calls_used: Optional[int] = None) -> Dict[str, Any]:
+    with _meta_cache_lock:
+        ts_slow, items_slow, source = _slow_aps_cache
+        _, cached_active_sites = _active_ap_sites_cache
+    sites_cnt = active_ap_sites_count if active_ap_sites_count is not None else len(cached_active_sites)
+    scanned = items_slow is not None and source != "not_scanned"
+    now = time.time()
+    age = int(max(0.0, now - ts_slow)) if scanned and ts_slow > 0 else None
+    meta: Dict[str, Any] = {
+        "scanned": scanned,
+        "source": source if scanned else "not_scanned",
+        "scanned_at": datetime.fromtimestamp(ts_slow, tz=timezone.utc).isoformat() if scanned and ts_slow > 0 else None,
+        "cache_age_seconds": age,
+        "active_ap_sites_count": sites_cnt,
+        "estimated_calls": max(1, sites_cnt) if sites_cnt > 0 else 1,
+        "cache_ttl_seconds": SLOW_AP_CACHE_TTL_SECONDS,
+    }
+    if calls_used is not None:
+        meta["calls_used"] = calls_used
+    return meta
 
 
 def _record_mist_api_call() -> None:
@@ -582,7 +646,7 @@ def deduplicate_org_clients(
 
 
 def collect_mist_snapshot() -> Dict[str, Any]:
-    global _last_snapshot_call_count, _switch_info_map_cache, _slow_aps_cache
+    global _last_snapshot_call_count, _switch_info_map_cache, _slow_aps_cache, _active_ap_sites_cache
     if not MIST_ORG_ID or not MIST_API_TOKEN:
         raise ValueError("MIST_ORG_ID and MIST_API_TOKEN must be configured in environment variables.")
 
@@ -863,28 +927,22 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 }
             )
 
-        # If org-wide AP stats omitted port_stat, scan AP uplinks at most once every 30 minutes
+        # Cache active AP sites so on-demand POST /api/slow-aps/scan knows which sites to query
+        with _meta_cache_lock:
+            _active_ap_sites_cache = (time.time(), list(active_ap_sites))
+
+        # Only populate slow_aps automatically if org-wide AP stats already included port_stat (0 extra calls).
+        # Otherwise keep slow AP uplink scanning strictly on-demand via POST /api/slow-aps/scan.
         if org_aps_have_port_stat:
             with _meta_cache_lock:
-                _slow_aps_cache = (time.time(), list(slow_aps))
-        elif active_ap_sites:
-            now_ts = time.time()
-            cached_slow: Optional[List[Dict[str, Any]]] = None
+                _slow_aps_cache = (time.time(), list(slow_aps), "org_stats")
+        else:
             with _meta_cache_lock:
-                ts_slow, items_slow = _slow_aps_cache
-                if items_slow is not None and (now_ts - ts_slow) < SLOW_AP_CACHE_TTL_SECONDS:
-                    cached_slow = list(items_slow)
-            if cached_slow is not None:
-                slow_aps = cached_slow
-            else:
-                scanned_slow, slow_warns = _scan_slow_aps_from_sites(
-                    session, active_ap_sites, rate_limit_flag
-                )
-                slow_aps = scanned_slow
-                warnings.extend(slow_warns)
-                if not slow_warns:
-                    with _meta_cache_lock:
-                        _slow_aps_cache = (time.time(), list(slow_aps))
+                _, items_slow, source_slow = _slow_aps_cache
+                if items_slow is not None and source_slow != "not_scanned":
+                    slow_aps = list(items_slow)
+
+        slow_aps_meta = _build_slow_aps_meta(active_ap_sites_count=len(active_ap_sites))
 
         sites_summary.sort(key=lambda s: (-s["total_users"], s["name"].lower()))
         all_aps_list.sort(key=lambda a: (-a["num_clients"], a["name"].lower()))
@@ -909,6 +967,13 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         other_wireless_users = max(
             0,
             total_wireless_users - total_eduroam_users - total_uop_visitor_users - total_uop_connect_users,
+        )
+
+        traffic_active_sites_count = sum(
+            1
+            for s in sites_summary
+            if (int(s.get("aps_online") or 0) + int(s.get("aps_offline") or 0)) > 0
+            or int(s.get("total_users") or 0) > 0
         )
 
         with _quota_lock:
@@ -939,7 +1004,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 "switches_offline": switches_offline,
                 "switches_total": switches_online + switches_offline,
                 "devices_down_total": len(devices_down),
-                "slow_aps_count": len(slow_aps),
+                "slow_aps_count": len(slow_aps) if slow_aps_meta["scanned"] else None,
+                "slow_aps_scanned": slow_aps_meta["scanned"],
                 "avg_rssi": round(sum(rssi_values) / len(rssi_values), 1) if rssi_values else None,
             },
             "sites": sites_summary,
@@ -951,6 +1017,15 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             "offline_switches": offline_switches,
             "devices_down": devices_down,
             "slow_aps": slow_aps,
+            "slow_aps_meta": slow_aps_meta,
+            "estimates": {
+                "traffic_all_sites_calls": max(1, traffic_active_sites_count),
+                "traffic_single_site_calls": 1,
+                "slow_aps_scan_calls": slow_aps_meta["estimated_calls"],
+                "nac_rejects_min_calls": 4,
+                "nac_rejects_max_calls": 12,
+            },
+            "polling": get_polling_state(),
             "alarms": alarms,
             "warnings": warnings,
             "api_quota": get_mist_api_quota_snapshot(),
@@ -1332,26 +1407,47 @@ def health():
             "api_host": MIST_API_HOST,
             "configured": bool(MIST_ORG_ID and MIST_API_TOKEN),
             "cache_ttl_seconds": CACHE_TTL_SECONDS,
+            "polling": get_polling_state(),
             "api_quota": get_mist_api_quota_snapshot(),
         }
     )
 
 
+def _attach_live_stats_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure cached/fresh /api/stats payloads reflect latest polling state, quota, and slow AP scan cache."""
+    with _meta_cache_lock:
+        _, items_slow, source_slow = _slow_aps_cache
+    slow_meta = _build_slow_aps_meta()
+    payload["slow_aps_meta"] = slow_meta
+    if items_slow is not None and source_slow != "not_scanned":
+        payload["slow_aps"] = list(items_slow)
+        summary = dict(payload.get("summary") or {})
+        summary["slow_aps_count"] = len(items_slow)
+        summary["slow_aps_scanned"] = True
+        payload["summary"] = summary
+    estimates = dict(payload.get("estimates") or {})
+    estimates["slow_aps_scan_calls"] = slow_meta["estimated_calls"]
+    payload["estimates"] = estimates
+    payload["polling"] = get_polling_state()
+    payload["api_quota"] = get_mist_api_quota_snapshot()
+    payload["auth_user"] = _current_user()
+    return payload
+
+
 def _serve_cached_stats_if_valid(force_refresh: bool) -> Optional[Dict[str, Any]]:
     now = time.time()
+    paused = _is_polling_paused()
     with _cache_lock:
         cache_age = now - _cache_timestamp
         can_use_cache = _cache_data is not None and (
-            (not force_refresh and cache_age < CACHE_TTL_SECONDS)
+            (not force_refresh and (paused or cache_age < CACHE_TTL_SECONDS))
             or (force_refresh and cache_age < MIN_REFRESH_INTERVAL)
         )
         if can_use_cache and _cache_data is not None:
             payload = dict(_cache_data)
             payload["cached"] = True
             payload["cache_age_seconds"] = int(cache_age)
-            payload["api_quota"] = get_mist_api_quota_snapshot()
-            payload["auth_user"] = _current_user()
-            return payload
+            return _attach_live_stats_fields(payload)
     return None
 
 
@@ -1400,9 +1496,204 @@ def api_stats():
     payload = dict(fresh_data)
     payload["cached"] = False
     payload["cache_age_seconds"] = 0
-    payload["api_quota"] = get_mist_api_quota_snapshot()
-    payload["auth_user"] = _current_user()
+    _attach_live_stats_fields(payload)
     resp = jsonify(payload)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/api/polling/state")
+def api_polling_state_get():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    resp = jsonify({**get_polling_state(), "api_quota": get_mist_api_quota_snapshot()})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/polling/state")
+def api_polling_state_post():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+
+    payload = request.get_json(silent=True) or {}
+    current_paused = _is_polling_paused()
+    next_paused: Optional[bool] = None
+
+    if "paused" in payload:
+        raw = payload.get("paused")
+        if isinstance(raw, bool):
+            next_paused = raw
+        elif isinstance(raw, str):
+            next_paused = raw.strip().lower() in ("1", "true", "yes", "paused")
+        else:
+            next_paused = bool(raw)
+    elif "enabled" in payload:
+        raw = payload.get("enabled")
+        enabled_val = raw if isinstance(raw, bool) else str(raw).strip().lower() in ("1", "true", "yes", "active")
+        next_paused = not enabled_val
+    elif "action" in payload:
+        action = str(payload.get("action") or "").strip().lower()
+        if action == "pause":
+            next_paused = True
+        elif action in ("resume", "active", "start"):
+            next_paused = False
+        elif action == "toggle":
+            next_paused = not current_paused
+    else:
+        next_paused = not current_paused
+
+    if next_paused is None:
+        return jsonify({"error": "Provide 'paused' (boolean) or 'action' ('pause'|'resume'|'toggle')."}), 400
+
+    user = _current_user()
+    actor = (user.get("email") or user.get("name")) if isinstance(user, dict) else "operator"
+    state = set_polling_paused(next_paused, actor=actor)
+    resp = jsonify({**state, "api_quota": get_mist_api_quota_snapshot()})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/slow-aps/scan")
+def api_slow_aps_scan():
+    global _slow_aps_cache, _active_ap_sites_cache, _cache_data
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    payload = request.get_json(silent=True) or {}
+    force_scan = bool(payload.get("force", True))
+
+    with _slow_aps_scan_lock:
+        now = time.time()
+        with _meta_cache_lock:
+            ts_slow, items_slow, source_slow = _slow_aps_cache
+            _, cached_active_sites = _active_ap_sites_cache
+        age = now - ts_slow if ts_slow > 0 else 1e9
+        if items_slow is not None and source_slow != "not_scanned" and (
+            (not force_scan and age < SLOW_AP_CACHE_TTL_SECONDS)
+            or (force_scan and age < MIN_REFRESH_INTERVAL)
+        ):
+            meta = _build_slow_aps_meta(calls_used=0)
+            resp = jsonify(
+                {
+                    "slow_aps": list(items_slow),
+                    "slow_aps_count": len(items_slow),
+                    "slow_aps_meta": meta,
+                    "cached": True,
+                    "calls_used": 0,
+                    "warnings": [],
+                    "api_quota": get_mist_api_quota_snapshot(),
+                }
+            )
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+
+        session = _new_mist_session()
+        rate_limit_flag = threading.Event()
+        warnings: List[str] = []
+        slow_aps: List[Dict[str, Any]] = []
+        source_label = "on_demand"
+
+        try:
+            active_ap_sites = list(cached_active_sites)
+            if not active_ap_sites:
+                # Derive active AP sites from cached snapshot or Mist sites/devices
+                with _cache_lock:
+                    if isinstance(_cache_data, dict):
+                        active_ap_sites = [
+                            {"id": s["id"], "name": s.get("name") or s["id"]}
+                            for s in (_cache_data.get("sites") or [])
+                            if isinstance(s, dict) and s.get("id") and int(s.get("aps_online") or 0) > 0
+                        ]
+
+            if not active_ap_sites:
+                sites_raw = _get_sites_raw_cached(session)
+                site_map = {s["id"]: s for s in sites_raw if isinstance(s, dict) and s.get("id")}
+                raw_org_aps = mist_get_paginated(
+                    session,
+                    f"/api/v1/orgs/{MIST_ORG_ID}/stats/devices",
+                    params={"type": "ap", "status": "connected"},
+                    limit=1000,
+                    send_page_params=True,
+                    dedup_keys=("mac", "id"),
+                )
+                org_has_port_stat = any(
+                    isinstance(ap, dict) and isinstance(ap.get("port_stat"), dict) and ap.get("port_stat")
+                    for ap in raw_org_aps
+                )
+                active_ids = set()
+                for ap in raw_org_aps:
+                    if not isinstance(ap, dict):
+                        continue
+                    sid = str(ap.get("site_id") or "")
+                    if sid in site_map:
+                        active_ids.add(sid)
+                    if org_has_port_stat:
+                        site_name = site_map.get(sid, {}).get("name", sid or "Unknown Site")
+                        ip_stat = ap.get("ip_stat") if isinstance(ap.get("ip_stat"), dict) else {}
+                        ap_ip = str(ap.get("ip") or ip_stat.get("ip") or "").strip()
+                        for degraded in extract_ap_uplink_info(ap):
+                            slow_aps.append(
+                                {
+                                    "name": ap.get("name") or ap.get("mac", "Unnamed AP"),
+                                    "site_name": site_name,
+                                    "model": ap.get("model", ""),
+                                    "mac": ap.get("mac", ""),
+                                    "ip": ap_ip,
+                                    "num_clients": int(ap.get("num_clients") or 0),
+                                    **degraded,
+                                }
+                            )
+                active_ap_sites = [site_map[sid] for sid in active_ids if sid in site_map]
+                with _meta_cache_lock:
+                    _active_ap_sites_cache = (time.time(), list(active_ap_sites))
+                if org_has_port_stat:
+                    source_label = "org_stats"
+                elif active_ap_sites:
+                    slow_aps, warnings = _scan_slow_aps_from_sites(session, active_ap_sites, rate_limit_flag)
+            else:
+                slow_aps, warnings = _scan_slow_aps_from_sites(session, active_ap_sites, rate_limit_flag)
+        except MistRateLimitError as exc:
+            return jsonify({"error": str(exc), "api_quota": get_mist_api_quota_snapshot()}), 429
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 502
+            return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
+        except Exception as exc:
+            return jsonify({"error": f"Failed to scan AP uplinks: {exc}"}), 502
+        finally:
+            calls_used = session.call_count
+            session.close()
+
+        slow_aps.sort(key=lambda a: (a["speed"], a["site_name"].lower(), a["name"].lower()))
+
+        with _meta_cache_lock:
+            _slow_aps_cache = (time.time(), list(slow_aps), source_label)
+            active_cnt = len(_active_ap_sites_cache[1]) or len(active_ap_sites)
+
+        meta = _build_slow_aps_meta(active_ap_sites_count=active_cnt, calls_used=calls_used)
+
+        with _cache_lock:
+            if isinstance(_cache_data, dict):
+                _cache_data["slow_aps"] = list(slow_aps)
+                _cache_data["slow_aps_meta"] = meta
+                summary = _cache_data.get("summary")
+                if isinstance(summary, dict):
+                    summary["slow_aps_count"] = len(slow_aps)
+                    summary["slow_aps_scanned"] = True
+
+    resp = jsonify(
+        {
+            "slow_aps": slow_aps,
+            "slow_aps_count": len(slow_aps),
+            "slow_aps_meta": meta,
+            "cached": False,
+            "calls_used": calls_used,
+            "warnings": warnings,
+            "api_quota": get_mist_api_quota_snapshot(),
+        }
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -1448,6 +1739,7 @@ def _serve_cached_nac_if_valid(duration: str, force_refresh: bool) -> Optional[D
             ):
                 out = dict(cached_payload)
                 out["cached"] = True
+                out["calls_used"] = 0
                 out["cache_age_seconds"] = int(age)
                 out["cache_ttl_seconds"] = NAC_CACHE_TTL_SECONDS
                 out["api_quota"] = get_mist_api_quota_snapshot()
@@ -1501,6 +1793,7 @@ def api_nac_rejects():
         except Exception as exc:
             return jsonify({"error": f"Failed to query Mist NAC server rejects: {exc}"}), 502
         finally:
+            calls_used = session.call_count
             session.close()
 
         fresh["fetched_at"] = datetime.now(timezone.utc).isoformat()
@@ -1510,6 +1803,7 @@ def api_nac_rejects():
 
     out = dict(fresh)
     out["cached"] = False
+    out["calls_used"] = calls_used
     out["cache_age_seconds"] = 0
     out["api_quota"] = get_mist_api_quota_snapshot()
     resp = jsonify(out)
@@ -1644,6 +1938,7 @@ def _serve_cached_traffic_if_valid(
             ):
                 out = dict(cached_payload)
                 out["cached"] = True
+                out["calls_used"] = 0
                 out["cache_age_seconds"] = int(age)
                 out["api_quota"] = get_mist_api_quota_snapshot()
                 return out
@@ -1711,6 +2006,7 @@ def api_traffic():
         except Exception as exc:
             return jsonify({"error": f"Failed to query Mist traffic usage: {exc}"}), 502
         finally:
+            calls_used = session.call_count
             session.close()
 
         fresh["fetched_at"] = datetime.now(timezone.utc).isoformat()
@@ -1725,6 +2021,7 @@ def api_traffic():
 
     out = dict(fresh)
     out["cached"] = False
+    out["calls_used"] = calls_used
     out["cache_age_seconds"] = 0
     out["api_quota"] = get_mist_api_quota_snapshot()
     resp = jsonify(out)
@@ -1737,26 +2034,30 @@ _collector_lock = threading.Lock()
 
 
 def _history_collector_loop() -> None:
-    """Continuously record Mist Wi-Fi client snapshots in the background so peaks are never missed."""
+    """Continuously record Mist Wi-Fi client snapshots in the background when auto-sync is active."""
     global _cache_data, _cache_timestamp
-    time.sleep(8)
+    _polling_wake_event.wait(timeout=8)
+    _polling_wake_event.clear()
     while True:
         try:
-            with _snapshot_fetch_lock:
-                with _cache_lock:
-                    cache_age = time.time() - _cache_timestamp
-                    has_recent_cache = _cache_data is not None and cache_age < max(
-                        60, HISTORY_SAMPLE_INTERVAL_SECONDS - 15
-                    )
-                if not has_recent_cache:
-                    fresh_data = collect_mist_snapshot()
-                    with _cache_lock:
-                        _cache_data = fresh_data
-                        _cache_timestamp = time.time()
-                    record_snapshot(HISTORY_DB_PATH, fresh_data)
+            if not _is_polling_paused():
+                with _snapshot_fetch_lock:
+                    if not _is_polling_paused():
+                        with _cache_lock:
+                            cache_age = time.time() - _cache_timestamp
+                            has_recent_cache = _cache_data is not None and cache_age < max(
+                                60, HISTORY_SAMPLE_INTERVAL_SECONDS - 15
+                            )
+                        if not has_recent_cache:
+                            fresh_data = collect_mist_snapshot()
+                            with _cache_lock:
+                                _cache_data = fresh_data
+                                _cache_timestamp = time.time()
+                            record_snapshot(HISTORY_DB_PATH, fresh_data)
         except Exception:
             pass
-        time.sleep(HISTORY_SAMPLE_INTERVAL_SECONDS)
+        _polling_wake_event.wait(timeout=HISTORY_SAMPLE_INTERVAL_SECONDS)
+        _polling_wake_event.clear()
 
 
 def _start_history_collector() -> None:

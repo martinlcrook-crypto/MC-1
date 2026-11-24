@@ -1151,10 +1151,12 @@ def collect_traffic_usage(
     avg_tx_mbps_overall = (grand_tx_bytes * 8.0) / max(1, total_elapsed_sec) / 1e6
     avg_rx_mbps_overall = (grand_rx_bytes * 8.0) / max(1, total_elapsed_sec) / 1e6
 
-    if grand_total_bytes <= 0 and target_site_ids:
-        probe_diag = _summarize_raw_probe(session, api_host, target_site_ids[0], start_ts_val, end_ts_val)
-        if probe_diag:
-            warnings.append(f"Mist probe: {probe_diag}")
+    if grand_total_bytes <= 0 and not warnings:
+        if (now_epoch - end_ts_val) > 7 * 86400 or (now_epoch - start_ts_val) > 7 * 86400:
+            earliest_dt = datetime.fromtimestamp(now_epoch - 7 * 86400, tz=timezone.utc).astimezone(DISPLAY_TZ)
+            warnings.append(
+                f"Mist EU returned no stored telemetry for this window — standard Mist Insights retains hourly site traffic for the last 7 days (from {earliest_dt.strftime('%a %d %b %Y, %H:%M')})."
+            )
 
     return {
         "days": effective_days,

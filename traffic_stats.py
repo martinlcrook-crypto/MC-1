@@ -47,10 +47,10 @@ class MetricSpec:
     total_key: Optional[str]
     kind: str  # "bytes" or "bps"
     unit_scale: float = 1.0
-    # "path": GET /sites/{site_id}/insights/{total_key}
-    # "paired_path": GET /sites/{site_id}/insights/{rx_key} AND /insights/{tx_key}
-    # "query": GET /sites/{site_id}/insights?metrics={query_metrics}
-    mode: str = "path"
+    # "site_stats": GET /api/v1/sites/{site_id}/insights/site/{site_id}/stats?start=...&end=...&interval=3600&metrics=...
+    # "path":       GET /api/v1/sites/{site_id}/insights/{total_key}?start=...&end=...&interval=3600
+    # "paired_path":GET /api/v1/sites/{site_id}/insights/{rx_key} AND /insights/{tx_key}
+    mode: str = "site_stats"
 
 
 def _unit_multiplier(unit: Any, kind: str) -> float:
@@ -113,7 +113,7 @@ def _is_site_metric(meta: Any) -> bool:
 
 
 def _build_metric_candidates(const_metrics: Dict[str, Any]) -> List[MetricSpec]:
-    """Order candidate Mist site-level traffic metrics using Mist's live /insights/{metric} path form."""
+    """Order Mist site-level traffic endpoints starting with /insights/site/{site_id}/stats."""
     candidates: List[MetricSpec] = []
     seen = set()
 
@@ -133,77 +133,98 @@ def _build_metric_candidates(const_metrics: Dict[str, Any]) -> List[MetricSpec]:
         meta = site_keys.get(metric_key) or {}
         return _unit_multiplier(meta.get("unit") or meta.get("units"), kind)
 
-    # 1. If Mist advertises paired site-scoped RX/TX metrics in const/insight_metrics, try paired path calls first
-    paired_defs = [
-        ("rx_bytes", "tx_bytes", "bytes"),
-        ("rx-bytes", "tx-bytes", "bytes"),
-        ("bytes_rx", "bytes_tx", "bytes"),
-        ("rx_bps", "tx_bps", "bps"),
-        ("rx-bps", "tx-bps", "bps"),
-        ("bps_rx", "bps_tx", "bps"),
-    ]
-    for rx_k, tx_k, kind in paired_defs:
-        if rx_k in site_keys and tx_k in site_keys:
-            add(
-                MetricSpec(
-                    query_metrics=f"{rx_k},{tx_k}",
-                    rx_key=rx_k,
-                    tx_key=tx_k,
-                    total_key=None,
-                    kind=kind,
-                    unit_scale=scale_for(rx_k, kind),
-                    mode="paired_path",
-                )
-            )
+    # 1. Primary Mist Portal endpoint: GET /api/v1/sites/{site_id}/insights/site/{site_id}/stats
+    #    Returns {"rt": [...], "rx_bytes": [...], "tx_bytes": [...]} in a single call per site!
+    add(
+        MetricSpec(
+            query_metrics="rx_bytes,tx_bytes",
+            rx_key="rx_bytes",
+            tx_key="tx_bytes",
+            total_key=None,
+            kind="bytes",
+            unit_scale=scale_for("rx_bytes", "bytes"),
+            mode="site_stats",
+        )
+    )
+    add(
+        MetricSpec(
+            query_metrics="bytes",
+            rx_key=None,
+            tx_key=None,
+            total_key="bytes",
+            kind="bytes",
+            unit_scale=scale_for("bytes", "bytes"),
+            mode="site_stats",
+        )
+    )
+    add(
+        MetricSpec(
+            query_metrics="rx_bps,tx_bps",
+            rx_key="rx_bps",
+            tx_key="tx_bps",
+            total_key=None,
+            kind="bps",
+            unit_scale=scale_for("rx_bps", "bps"),
+            mode="site_stats",
+        )
+    )
+    add(
+        MetricSpec(
+            query_metrics="bps",
+            rx_key=None,
+            tx_key=None,
+            total_key="bps",
+            kind="bps",
+            unit_scale=scale_for("bps", "bps"),
+            mode="site_stats",
+        )
+    )
 
-    # 2. Known single combined site-level traffic metrics advertised in const/insight_metrics (path form)
-    single_defs = [
-        ("bytes", "bytes"),
-        ("client-bytes", "bytes"),
-        ("client_bytes", "bytes"),
-        ("total-bytes", "bytes"),
-        ("total_bytes", "bytes"),
-        ("wireless-bytes", "bytes"),
-        ("bps", "bps"),
-        ("bandwidth", "bps"),
-        ("throughput", "bps"),
-    ]
-    for total_k, kind in single_defs:
-        if total_k in site_keys:
-            add(
-                MetricSpec(
-                    query_metrics=total_k,
-                    rx_key=None,
-                    tx_key=None,
-                    total_key=total_k,
-                    kind=kind,
-                    unit_scale=scale_for(total_k, kind),
-                    mode="path",
-                )
-            )
-
-    # 3. Any additional discovered site-scoped byte/bps/bandwidth metrics from const/insight_metrics
-    exclude_tokens = ("pkt", "packet", "err", "drop", "retry", "util", "bcast", "mcast", "wired", "wan", "dhcp", "dns", "top-")
-    for k in sorted(site_keys.keys()):
-        low = k.lower()
-        if any(tok in low for tok in exclude_tokens):
-            continue
-        if "byte" in low and not low.startswith(("rx_", "tx_", "rx-", "tx-")):
-            add(MetricSpec(query_metrics=k, rx_key=None, tx_key=None, total_key=k, kind="bytes", unit_scale=scale_for(k, "bytes"), mode="path"))
-        elif ("bps" in low or "bandwidth" in low) and not low.startswith(("rx_", "tx_", "rx-", "tx-")):
-            add(MetricSpec(query_metrics=k, rx_key=None, tx_key=None, total_key=k, kind="bps", unit_scale=scale_for(k, "bps"), mode="path"))
-
-    # 4. Built-in Mist live path fallbacks (/api/v1/sites/{site_id}/insights/{metric})
-    add(MetricSpec(query_metrics="bytes", rx_key=None, tx_key=None, total_key="bytes", kind="bytes", mode="path"))
-    add(MetricSpec(query_metrics="rx_bytes,tx_bytes", rx_key="rx_bytes", tx_key="tx_bytes", total_key=None, kind="bytes", mode="paired_path"))
-    add(MetricSpec(query_metrics="client-bytes", rx_key=None, tx_key=None, total_key="client-bytes", kind="bytes", mode="path"))
-    add(MetricSpec(query_metrics="bps", rx_key=None, tx_key=None, total_key="bps", kind="bps", mode="path"))
-    add(MetricSpec(query_metrics="bandwidth", rx_key=None, tx_key=None, total_key="bandwidth", kind="bps", mode="path"))
-    add(MetricSpec(query_metrics="rx_bps,tx_bps", rx_key="rx_bps", tx_key="tx_bps", total_key=None, kind="bps", mode="paired_path"))
-
-    # 5. Legacy query-param fallback (?metrics=...) in case a tenant proxy exposes it
-    add(MetricSpec(query_metrics="rx_bytes,tx_bytes", rx_key="rx_bytes", tx_key="tx_bytes", total_key=None, kind="bytes", mode="query"))
-    add(MetricSpec(query_metrics="bytes", rx_key=None, tx_key=None, total_key="bytes", kind="bytes", mode="query"))
+    # 2. Secondary Mist path form: GET /api/v1/sites/{site_id}/insights/{metric}
+    add(
+        MetricSpec(
+            query_metrics="bytes",
+            rx_key=None,
+            tx_key=None,
+            total_key="bytes",
+            kind="bytes",
+            unit_scale=scale_for("bytes", "bytes"),
+            mode="path",
+        )
+    )
+    add(
+        MetricSpec(
+            query_metrics="rx_bytes,tx_bytes",
+            rx_key="rx_bytes",
+            tx_key="tx_bytes",
+            total_key=None,
+            kind="bytes",
+            unit_scale=scale_for("rx_bytes", "bytes"),
+            mode="paired_path",
+        )
+    )
+    add(
+        MetricSpec(
+            query_metrics="bps",
+            rx_key=None,
+            tx_key=None,
+            total_key="bps",
+            kind="bps",
+            unit_scale=scale_for("bps", "bps"),
+            mode="path",
+        )
+    )
+    add(
+        MetricSpec(
+            query_metrics="rx_bps,tx_bps",
+            rx_key="rx_bps",
+            tx_key="tx_bps",
+            total_key=None,
+            kind="bps",
+            unit_scale=scale_for("rx_bps", "bps"),
+            mode="paired_path",
+        )
+    )
 
     return candidates
 
@@ -219,6 +240,16 @@ def _to_float(val: Any) -> Optional[float]:
         return f if f >= 0 else 0.0
     except (TypeError, ValueError):
         return None
+
+
+def _norm_epoch_sec(ts_val: Any) -> int:
+    f = _to_float(ts_val)
+    if f is None or f <= 0:
+        return 0
+    # Convert millisecond timestamps to seconds automatically
+    if f > 1e12:
+        f = f / 1000.0
+    return int(f)
 
 
 def _extract_array_from_field(payload: Dict[str, Any], key: Optional[str]) -> Tuple[Optional[List[Any]], Optional[List[Any]]]:
@@ -246,7 +277,7 @@ def _resolve_timestamps(
     if not isinstance(rt_top, list):
         rt_top = payload.get("timestamps") if isinstance(payload.get("timestamps"), list) else None
 
-    start_val = _to_float(payload.get("start"))
+    start_sec = _norm_epoch_sec(payload.get("start"))
     resp_interval = int(_to_float(payload.get("interval")) or default_interval)
     if resp_interval <= 0:
         resp_interval = default_interval
@@ -255,11 +286,9 @@ def _resolve_timestamps(
     timestamps: List[int] = []
     if isinstance(rt_src, list) and len(rt_src) >= length:
         for i in range(length):
-            t = _to_float(rt_src[i])
-            timestamps.append(int(t) if t is not None else 0)
-    elif start_val is not None and start_val > 0:
-        base = int(start_val)
-        timestamps = [base + i * resp_interval for i in range(length)]
+            timestamps.append(_norm_epoch_sec(rt_src[i]))
+    elif start_sec > 0:
+        timestamps = [start_sec + i * resp_interval for i in range(length)]
 
     step_sec = resp_interval
     if len(timestamps) >= 2:
@@ -281,13 +310,12 @@ def _extract_single_value_series(
     if not isinstance(payload, dict):
         return [], False
 
-    # Case 1: Mist standard /insights/{metric} response with `results` list of numbers (or dicts)
+    # Case 1: Mist `results` array (numbers or dicts)
     if isinstance(payload.get("results"), list):
         results = payload["results"]
         if len(results) == 0:
             return [], True
 
-        # Check if numeric/null array (e.g., [123456, 234567, None, ...])
         non_null = [x for x in results if x is not None]
         if not non_null:
             return [], True
@@ -306,7 +334,6 @@ def _extract_single_value_series(
                 out.append((ts, b_val))
             return out, True
 
-        # Dict array inside `results`
         if any(isinstance(x, dict) for x in non_null):
             timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
             out = []
@@ -315,9 +342,9 @@ def _extract_single_value_series(
             for i, row in enumerate(results):
                 if not isinstance(row, dict):
                     continue
-                ts_raw = row.get("ts") or row.get("timestamp") or row.get("rt") or row.get("time")
-                ts_f = _to_float(ts_raw)
-                ts = int(ts_f) if (ts_f is not None and ts_f > 0) else (timestamps[i] if i < len(timestamps) else 0)
+                ts = _norm_epoch_sec(row.get("ts") or row.get("timestamp") or row.get("rt") or row.get("time"))
+                if ts <= 0 and i < len(timestamps):
+                    ts = timestamps[i]
                 if ts <= 0:
                     continue
                 chosen_k = next((ck for ck in candidate_keys if ck in row), None)
@@ -363,7 +390,36 @@ def _extract_site_series(
     if not isinstance(payload, dict):
         return [], False
 
-    # Format A: `results` array (supports plain numbers OR dicts with rx/tx or total)
+    # Format A: Columnar Mist response (the exact format of /insights/site/{site_id}/stats!)
+    # e.g. {"start": ..., "end": ..., "interval": 3600, "rt": [...], "rx_bytes": [...], "tx_bytes": [...]}
+    if spec.rx_key and spec.tx_key:
+        rx_arr, rx_rt = _extract_array_from_field(payload, spec.rx_key)
+        tx_arr, tx_rt = _extract_array_from_field(payload, spec.tx_key)
+        if rx_arr is not None or tx_arr is not None:
+            n = max(len(rx_arr or []), len(tx_arr or []))
+            if n == 0:
+                return [], True
+            timestamps, step_sec = _resolve_timestamps(payload, n, default_interval, rx_rt or tx_rt)
+            if len(timestamps) < n:
+                return [], False
+            points: List[Tuple[int, float, float, float]] = []
+            for i in range(n):
+                ts = timestamps[i]
+                if ts <= 0:
+                    continue
+                rx_raw = (_to_float(rx_arr[i]) if rx_arr is not None and i < len(rx_arr) else None) or 0.0
+                tx_raw = (_to_float(tx_arr[i]) if tx_arr is not None and i < len(tx_arr) else None) or 0.0
+                rx_val = rx_raw * spec.unit_scale
+                tx_val = tx_raw * spec.unit_scale
+                if spec.kind == "bps":
+                    rx_b = rx_val * step_sec / 8.0
+                    tx_b = tx_val * step_sec / 8.0
+                else:
+                    rx_b, tx_b = rx_val, tx_val
+                points.append((ts, rx_b + tx_b, tx_b, rx_b))
+            return points, True
+
+    # Format B: `results` array (plain numbers OR dicts with rx/tx or total)
     if isinstance(payload.get("results"), list):
         results = payload["results"]
         if len(results) == 0:
@@ -373,14 +429,13 @@ def _extract_site_series(
         if not non_null:
             return [], True
 
-        # Mist live /insights/bytes returns `results: [12345, 23456, ...]`
         if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in non_null):
             if spec.rx_key and spec.tx_key and not spec.total_key:
                 return [], False
             timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
             if len(timestamps) < len(results):
                 return [], False
-            points: List[Tuple[int, float, float, float]] = []
+            points = []
             for i, raw_v in enumerate(results):
                 ts = timestamps[i]
                 if ts <= 0:
@@ -390,7 +445,6 @@ def _extract_site_series(
                 points.append((ts, tot_b, 0.0, 0.0))
             return points, True
 
-        # Mist `results` array of dicts (e.g. [{"rx_bytes": ..., "tx_bytes": ...}] or [{"bytes": ...}])
         if any(isinstance(x, dict) for x in non_null):
             timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
             points = []
@@ -402,9 +456,9 @@ def _extract_site_series(
             for i, row in enumerate(results):
                 if not isinstance(row, dict):
                     continue
-                ts_raw = row.get("ts") or row.get("timestamp") or row.get("rt") or row.get("time")
-                ts_f = _to_float(ts_raw)
-                ts = int(ts_f) if (ts_f is not None and ts_f > 0) else (timestamps[i] if i < len(timestamps) else 0)
+                ts = _norm_epoch_sec(row.get("ts") or row.get("timestamp") or row.get("rt") or row.get("time"))
+                if ts <= 0 and i < len(timestamps):
+                    ts = timestamps[i]
                 if ts <= 0:
                     continue
 
@@ -432,35 +486,7 @@ def _extract_site_series(
                     points.append((ts, tot_b, 0.0, 0.0))
             return points, matched_any
 
-    # Format B: Columnar Mist response keyed directly by metric name(s)
-    if spec.rx_key and spec.tx_key:
-        rx_arr, rx_rt = _extract_array_from_field(payload, spec.rx_key)
-        tx_arr, tx_rt = _extract_array_from_field(payload, spec.tx_key)
-        if rx_arr is None and tx_arr is None:
-            return [], False
-        n = max(len(rx_arr or []), len(tx_arr or []))
-        if n == 0:
-            return [], True
-        timestamps, step_sec = _resolve_timestamps(payload, n, default_interval, rx_rt or tx_rt)
-        if len(timestamps) < n:
-            return [], False
-        points = []
-        for i in range(n):
-            ts = timestamps[i]
-            if ts <= 0:
-                continue
-            rx_raw = (_to_float(rx_arr[i]) if rx_arr is not None and i < len(rx_arr) else None) or 0.0
-            tx_raw = (_to_float(tx_arr[i]) if tx_arr is not None and i < len(tx_arr) else None) or 0.0
-            rx_val = rx_raw * spec.unit_scale
-            tx_val = tx_raw * spec.unit_scale
-            if spec.kind == "bps":
-                rx_b = rx_val * step_sec / 8.0
-                tx_b = tx_val * step_sec / 8.0
-            else:
-                rx_b, tx_b = rx_val, tx_val
-            points.append((ts, rx_b + tx_b, tx_b, rx_b))
-        return points, True
-
+    # Format C: Single metric columnar array
     single_pts, ok = _extract_single_value_series(
         payload,
         metric_key=spec.total_key,
@@ -477,18 +503,18 @@ def _get_json_with_interval_fallback(
     session: requests.Session,
     url: str,
     base_params: Dict[str, str],
-    interval_str: str = "1h",
+    interval_val: str = "3600",
 ) -> Tuple[Optional[Any], Optional[str]]:
-    """GET Mist insights endpoint with `interval=1h`, retrying without `interval` on HTTP 400."""
+    """GET Mist insights endpoint with `interval=3600`, retrying without `interval` on HTTP 400."""
     params_with_int = dict(base_params)
-    if interval_str:
-        params_with_int["interval"] = interval_str
+    if interval_val:
+        params_with_int["interval"] = interval_val
     try:
         resp = session.get(url, params=params_with_int, timeout=20)
     except Exception as exc:
         return None, str(exc)
 
-    if resp.status_code == 400 and interval_str:
+    if resp.status_code == 400 and interval_val:
         try:
             resp = session.get(url, params=base_params, timeout=20)
         except Exception as exc:
@@ -503,6 +529,15 @@ def _get_json_with_interval_fallback(
         return None, f"Invalid JSON: {exc}"
 
 
+def _describe_payload_shape(payload: Any) -> str:
+    if isinstance(payload, dict):
+        keys = list(payload.keys())[:8]
+        return f"dict keys={keys}"
+    if isinstance(payload, list):
+        return f"list len={len(payload)}"
+    return type(payload).__name__
+
+
 def _query_site_insights(
     session: requests.Session,
     api_host: str,
@@ -510,25 +545,37 @@ def _query_site_insights(
     spec: MetricSpec,
     start_ts: int,
     end_ts: int,
-    interval_str: str = "1h",
+    interval_val: str = "3600",
 ) -> Tuple[Optional[List[Tuple[int, float, float, float]]], Optional[str]]:
     """Strictly read-only GET query to Mist site insights for one site."""
     base_params = {"start": str(start_ts), "end": str(end_ts)}
 
+    if spec.mode == "site_stats":
+        url = f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats"
+        q_params = dict(base_params)
+        q_params["metrics"] = spec.query_metrics
+        payload, err = _get_json_with_interval_fallback(session, url, q_params, interval_val)
+        if payload is None:
+            return None, err
+        points, ok = _extract_site_series(payload, spec, default_interval=3600)
+        if not ok:
+            return None, f"unparsed ({_describe_payload_shape(payload)})"
+        return points, None
+
     if spec.mode == "paired_path" and spec.rx_key and spec.tx_key:
         rx_url = f"{api_host}/api/v1/sites/{site_id}/insights/{spec.rx_key}"
         tx_url = f"{api_host}/api/v1/sites/{site_id}/insights/{spec.tx_key}"
-        rx_payload, rx_err = _get_json_with_interval_fallback(session, rx_url, base_params, interval_str)
+        rx_payload, rx_err = _get_json_with_interval_fallback(session, rx_url, base_params, interval_val)
         if rx_payload is None:
             return None, f"{spec.rx_key}: {rx_err}"
-        tx_payload, tx_err = _get_json_with_interval_fallback(session, tx_url, base_params, interval_str)
+        tx_payload, tx_err = _get_json_with_interval_fallback(session, tx_url, base_params, interval_val)
         if tx_payload is None:
             return None, f"{spec.tx_key}: {tx_err}"
 
         rx_pts, rx_ok = _extract_single_value_series(rx_payload, spec.rx_key, spec.kind, spec.unit_scale)
         tx_pts, tx_ok = _extract_single_value_series(tx_payload, spec.tx_key, spec.kind, spec.unit_scale)
         if not (rx_ok and tx_ok):
-            return None, f"Paired metrics '{spec.query_metrics}' not parseable"
+            return None, f"unparsed ({_describe_payload_shape(rx_payload)})"
 
         merged: Dict[int, List[float]] = {}
         for ts, rx_b in rx_pts:
@@ -538,22 +585,15 @@ def _query_site_insights(
         out = [(ts, vals[0] + vals[1], vals[1], vals[0]) for ts, vals in sorted(merged.items())]
         return out, None
 
-    if spec.mode == "path":
-        metric_name = spec.total_key or spec.query_metrics
-        url = f"{api_host}/api/v1/sites/{site_id}/insights/{metric_name}"
-        payload, err = _get_json_with_interval_fallback(session, url, base_params, interval_str)
-    else:
-        url = f"{api_host}/api/v1/sites/{site_id}/insights"
-        q_params = dict(base_params)
-        q_params["metrics"] = spec.query_metrics
-        payload, err = _get_json_with_interval_fallback(session, url, q_params, interval_str)
-
+    metric_name = spec.total_key or spec.query_metrics
+    url = f"{api_host}/api/v1/sites/{site_id}/insights/{metric_name}"
+    payload, err = _get_json_with_interval_fallback(session, url, base_params, interval_val)
     if payload is None:
         return None, err
 
     points, ok = _extract_site_series(payload, spec, default_interval=3600)
     if not ok:
-        return None, f"Metric '{spec.query_metrics}' not present in response"
+        return None, f"unparsed ({_describe_payload_shape(payload)})"
     return points, None
 
 
@@ -565,6 +605,31 @@ def _load_sites(
     prioritized_site_ids: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, str], List[str]]:
     sites = dict(site_name_map or {})
+    live_priority: List[str] = list(prioritized_site_ids or [])
+
+    if not sites or not live_priority:
+        # Try /orgs/{org_id}/stats/sites first: gives site names AND live client/AP counts so we probe active sites first!
+        try:
+            resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/stats/sites", params={"limit": 1000}, timeout=20)
+            if resp.status_code == 200:
+                raw_stats = resp.json()
+                if isinstance(raw_stats, list) and raw_stats:
+                    scored: List[Tuple[int, int, str]] = []
+                    for s in raw_stats:
+                        if not isinstance(s, dict) or not s.get("id"):
+                            continue
+                        sid = str(s["id"])
+                        if sid not in sites:
+                            sites[sid] = str(s.get("name") or sid)
+                        num_clients = int(_to_float(s.get("num_clients")) or 0)
+                        num_aps = int(_to_float(s.get("num_aps")) or 0)
+                        scored.append((num_clients, num_aps, sid))
+                    if not live_priority and scored:
+                        scored.sort(key=lambda t: (-t[0], -t[1], sites.get(t[2], "").lower()))
+                        live_priority = [t[2] for t in scored]
+        except Exception:
+            pass
+
     if not sites:
         resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/sites", params={"limit": 1000}, timeout=20)
         resp.raise_for_status()
@@ -576,7 +641,7 @@ def _load_sites(
 
     ordered_ids: List[str] = []
     seen = set()
-    for sid in prioritized_site_ids or []:
+    for sid in live_priority:
         if sid in sites and sid not in seen:
             seen.add(sid)
             ordered_ids.append(sid)
@@ -649,8 +714,8 @@ def collect_traffic_usage(
     chosen_spec: Optional[MetricSpec] = None
     prefetched: Dict[str, List[Tuple[int, float, float, float]]] = {}
 
-    # Probe active site(s) to discover the exact working Mist traffic metric on this cloud
-    probe_sites = target_site_ids[:3]
+    # Probe busiest active site(s) to verify the exact working Mist traffic endpoint & metric
+    probe_sites = target_site_ids[:5]
     best_zero_spec: Optional[MetricSpec] = None
     best_zero_prefetched: Dict[str, List[Tuple[int, float, float, float]]] = {}
     probe_errors: List[str] = []
@@ -661,7 +726,7 @@ def collect_traffic_usage(
         any_ok = False
         last_err: Optional[str] = None
         for sid in probe_sites:
-            pts, err = _query_site_insights(session, api_host, sid, spec, start_ts, end_ts, "1h")
+            pts, err = _query_site_insights(session, api_host, sid, spec, start_ts, end_ts, "3600")
             if pts is not None:
                 any_ok = True
                 spec_hits[sid] = pts
@@ -678,7 +743,7 @@ def collect_traffic_usage(
             best_zero_spec = spec
             best_zero_prefetched = spec_hits
         elif last_err and len(probe_errors) < 5:
-            probe_errors.append(f"{spec.query_metrics}({spec.mode}): {last_err}")
+            probe_errors.append(f"{spec.query_metrics}[{spec.mode}]: {last_err}")
 
     if chosen_spec is None and best_zero_spec is not None:
         chosen_spec = best_zero_spec
@@ -700,7 +765,7 @@ def collect_traffic_usage(
         max_workers = min(10, len(remaining_ids))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = {
-                pool.submit(_query_site_insights, session, api_host, sid, chosen_spec, start_ts, end_ts, "1h"): sid
+                pool.submit(_query_site_insights, session, api_host, sid, chosen_spec, start_ts, end_ts, "3600"): sid
                 for sid in remaining_ids
             }
             for fut in as_completed(futs):
@@ -902,7 +967,7 @@ def collect_traffic_usage(
         "timezone": DISPLAY_TIMEZONE,
         "start_ts": start_ts,
         "end_ts": end_ts,
-        "metric_used": chosen_spec.query_metrics,
+        "metric_used": f"{chosen_spec.query_metrics} ({chosen_spec.mode})",
         "metric_kind": chosen_spec.kind,
         "has_rx_tx_split": has_rx_tx_split,
         "sites_queried": len(target_site_ids),

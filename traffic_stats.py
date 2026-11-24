@@ -242,14 +242,52 @@ def _to_float(val: Any) -> Optional[float]:
         return None
 
 
+def _parse_interval_sec(val: Any, default_interval: int = 3600) -> int:
+    if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+        return int(val)
+    if isinstance(val, str):
+        s = val.strip().lower()
+        if s.isdigit():
+            v = int(s)
+            return v if v > 0 else default_interval
+        if len(s) >= 2 and s[:-1].replace(".", "", 1).isdigit():
+            num = float(s[:-1])
+            unit = s[-1]
+            mult = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}.get(unit)
+            if mult and num > 0:
+                return int(num * mult)
+    return default_interval
+
+
 def _norm_epoch_sec(ts_val: Any) -> int:
-    f = _to_float(ts_val)
-    if f is None or f <= 0:
+    if ts_val is None or isinstance(ts_val, bool):
         return 0
-    # Convert millisecond timestamps to seconds automatically
-    if f > 1e12:
-        f = f / 1000.0
-    return int(f)
+    if isinstance(ts_val, (int, float)):
+        f = float(ts_val)
+        if f <= 0:
+            return 0
+        if f > 1e12:
+            f = f / 1000.0
+        return int(f)
+    if isinstance(ts_val, str):
+        s = ts_val.strip()
+        if not s:
+            return 0
+        f = _to_float(s)
+        if f is not None and f > 0:
+            if f > 1e12:
+                f = f / 1000.0
+            return int(f)
+        # Parse ISO-8601 strings (e.g. "2026-11-19T12:00:00Z" or "2026-11-19 12:00:00")
+        iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+        try:
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp())
+        except ValueError:
+            pass
+    return 0
 
 
 def _extract_array_from_field(payload: Dict[str, Any], key: Optional[str]) -> Tuple[Optional[List[Any]], Optional[List[Any]]]:
@@ -272,27 +310,36 @@ def _resolve_timestamps(
     length: int,
     default_interval: int = 3600,
     rt_override: Optional[List[Any]] = None,
+    fallback_start: int = 0,
 ) -> Tuple[List[int], int]:
     rt_top = payload.get("rt")
     if not isinstance(rt_top, list):
         rt_top = payload.get("timestamps") if isinstance(payload.get("timestamps"), list) else None
 
     start_sec = _norm_epoch_sec(payload.get("start"))
-    resp_interval = int(_to_float(payload.get("interval")) or default_interval)
-    if resp_interval <= 0:
-        resp_interval = default_interval
+    end_sec = _norm_epoch_sec(payload.get("end"))
+    resp_interval = _parse_interval_sec(payload.get("interval"), default_interval)
 
     rt_src = rt_override if isinstance(rt_override, list) and len(rt_override) >= length else rt_top
     timestamps: List[int] = []
     if isinstance(rt_src, list) and len(rt_src) >= length:
-        for i in range(length):
-            timestamps.append(_norm_epoch_sec(rt_src[i]))
-    elif start_sec > 0:
-        timestamps = [start_sec + i * resp_interval for i in range(length)]
+        parsed_rt = [_norm_epoch_sec(rt_src[i]) for i in range(length)]
+        if sum(1 for t in parsed_rt if t > 0) > 0:
+            timestamps = parsed_rt
+
+    if not timestamps:
+        if start_sec > 0:
+            timestamps = [start_sec + i * resp_interval for i in range(length)]
+        elif end_sec > 0:
+            base = end_sec - length * resp_interval
+            timestamps = [base + i * resp_interval for i in range(length)]
+        elif fallback_start > 0:
+            timestamps = [fallback_start + i * resp_interval for i in range(length)]
 
     step_sec = resp_interval
-    if len(timestamps) >= 2:
-        diff = timestamps[1] - timestamps[0]
+    valid_ts = [t for t in timestamps if t > 0]
+    if len(valid_ts) >= 2:
+        diff = valid_ts[1] - valid_ts[0]
         if 60 <= diff <= 86400:
             step_sec = diff
 
@@ -538,6 +585,43 @@ def _describe_payload_shape(payload: Any) -> str:
     return type(payload).__name__
 
 
+def _summarize_raw_probe(session: requests.Session, api_host: str, site_id: str, start_ts: int, end_ts: int) -> str:
+    """Safely inspect structural metadata (no secrets/PII) of Mist EU responses when traffic sums to 0."""
+    parts: List[str] = []
+    probes = [
+        ("site_stats", f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats", {"start": str(start_ts), "end": str(end_ts), "interval": "3600", "metrics": "rx_bytes,tx_bytes"}),
+        ("site_stats_1h", f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats", {"duration": "5d", "interval": "1h", "metrics": "rx_bytes,tx_bytes"}),
+        ("path_bytes", f"{api_host}/api/v1/sites/{site_id}/insights/bytes", {"start": str(start_ts), "end": str(end_ts), "interval": "1h"}),
+        ("path_rx_bytes", f"{api_host}/api/v1/sites/{site_id}/insights/rx_bytes", {"start": str(start_ts), "end": str(end_ts), "interval": "1h"}),
+    ]
+    for label, url, params in probes:
+        try:
+            r = session.get(url, params=params, timeout=12)
+            if r.status_code != 200:
+                parts.append(f"{label}=HTTP {r.status_code}")
+                continue
+            j = r.json()
+            if isinstance(j, dict):
+                summary_bits = [f"keys={list(j.keys())[:6]}"]
+                for k in ("start", "end", "interval"):
+                    if k in j:
+                        summary_bits.append(f"{k}={j[k]}")
+                for k in ("rt", "rx_bytes", "tx_bytes", "bytes", "results"):
+                    v = j.get(k)
+                    if isinstance(v, list):
+                        non_zero = sum(1 for x in v if isinstance(x, (int, float)) and x > 0)
+                        sample = v[:2]
+                        summary_bits.append(f"{k}[len={len(v)},nz={non_zero},s={sample}]")
+                    elif v is not None:
+                        summary_bits.append(f"{k}={type(v).__name__}")
+                parts.append(f"{label}({', '.join(summary_bits)})")
+            else:
+                parts.append(f"{label}={type(j).__name__}")
+        except Exception as exc:
+            parts.append(f"{label}=err({exc})")
+    return " | ".join(parts)
+
+
 def _query_site_insights(
     session: requests.Session,
     api_host: str,
@@ -558,6 +642,16 @@ def _query_site_insights(
         if payload is None:
             return None, err
         points, ok = _extract_site_series(payload, spec, default_interval=3600)
+        if ok and sum(p[1] for p in points) > 0:
+            return points, None
+        # Retry with duration=Nd & interval=1h in case Mist prefers relative duration
+        dur_days = max(1, int(round((end_ts - start_ts) / 86400.0)))
+        dur_params = {"duration": f"{dur_days}d", "interval": "1h", "metrics": spec.query_metrics}
+        payload2, _ = _get_json_with_interval_fallback(session, url, dur_params, "")
+        if payload2 is not None:
+            points2, ok2 = _extract_site_series(payload2, spec, default_interval=3600)
+            if ok2 and sum(p[1] for p in points2) > 0:
+                return points2, None
         if not ok:
             return None, f"unparsed ({_describe_payload_shape(payload)})"
         return points, None
@@ -958,6 +1052,11 @@ def collect_traffic_usage(
     avg_mbps_overall = (grand_total_bytes * 8.0) / max(1, total_elapsed_sec) / 1e6
     avg_tx_mbps_overall = (grand_tx_bytes * 8.0) / max(1, total_elapsed_sec) / 1e6
     avg_rx_mbps_overall = (grand_rx_bytes * 8.0) / max(1, total_elapsed_sec) / 1e6
+
+    if grand_total_bytes <= 0 and target_site_ids:
+        probe_diag = _summarize_raw_probe(session, api_host, target_site_ids[0], start_ts, end_ts)
+        if probe_diag:
+            warnings.append(f"Mist probe: {probe_diag}")
 
     return {
         "days": days,

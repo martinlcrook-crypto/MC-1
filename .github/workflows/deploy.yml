@@ -180,7 +180,7 @@ jobs:
             printf 'MIST_API_HOST=https://api.eu.mist.com\n'
             printf 'MIST_ORG_ID=%s\n' "$MIST_ORG_ID"
             printf 'MIST_API_TOKEN=%s\n' "$MIST_API_TOKEN"
-            printf 'CACHE_TTL_SECONDS=60\n'
+            printf 'CACHE_TTL_SECONDS=180\n'
             printf 'PORT=80\n'
             printf 'HTTPS_ENABLED=%s\n' "$TLS_READY"
           } > .env

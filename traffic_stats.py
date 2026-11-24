@@ -1,5 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import os
 import threading
@@ -34,199 +33,9 @@ DAY_LABELS = {
     7: "Last 7 Days",
 }
 
-_const_metrics_lock = threading.Lock()
-_const_metrics_cache: Tuple[float, Dict[str, Any]] = (0.0, {})
-_CONST_METRICS_TTL = 3600.0
 
-
-@dataclass(frozen=True)
-class MetricSpec:
-    query_metrics: str
-    rx_key: Optional[str]
-    tx_key: Optional[str]
-    total_key: Optional[str]
-    kind: str  # "bytes" or "bps"
-    unit_scale: float = 1.0
-    # "site_stats": GET /api/v1/sites/{site_id}/insights/site/{site_id}/stats?start=...&end=...&interval=3600&metrics=...
-    # "path":       GET /api/v1/sites/{site_id}/insights/{total_key}?start=...&end=...&interval=3600
-    # "paired_path":GET /api/v1/sites/{site_id}/insights/{rx_key} AND /insights/{tx_key}
-    mode: str = "site_stats"
-
-
-def _unit_multiplier(unit: Any, kind: str) -> float:
-    u = str(unit or "").strip().lower()
-    if not u:
-        return 1.0
-    if kind == "bps":
-        if "gbps" in u or "gbit" in u:
-            return 1e9
-        if "mbps" in u or "mbit" in u:
-            return 1e6
-        if "kbps" in u or "kbit" in u:
-            return 1e3
-        return 1.0
-    # bytes
-    if u in ("tb", "tbyte", "tbytes", "terabytes"):
-        return 1e12
-    if u in ("gb", "gbyte", "gbytes", "gigabytes"):
-        return 1e9
-    if u in ("mb", "mbyte", "mbytes", "megabytes"):
-        return 1e6
-    if u in ("kb", "kbyte", "kbytes", "kilobytes"):
-        return 1e3
-    return 1.0
-
-
-def _fetch_const_insight_metrics(
-    session: requests.Session, api_host: str
-) -> Dict[str, Any]:
-    """Read-only fetch of Mist's /api/v1/const/insight_metrics dictionary (cached 1h)."""
-    global _const_metrics_cache
-    now = time.time()
-    with _const_metrics_lock:
-        ts, cached = _const_metrics_cache
-        if cached and (now - ts) < _CONST_METRICS_TTL:
-            return cached
-
-    try:
-        resp = session.get(f"{api_host}/api/v1/const/insight_metrics", timeout=12)
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, dict) and data:
-                with _const_metrics_lock:
-                    _const_metrics_cache = (now, data)
-                return data
-    except Exception:
-        pass
-    return {}
-
-
-def _is_site_metric(meta: Any) -> bool:
-    if not isinstance(meta, dict):
-        return True
-    scopes = meta.get("report_scopes") or meta.get("scopes") or meta.get("scope")
-    if isinstance(scopes, list) and scopes:
-        return any(str(s).strip().lower() == "site" for s in scopes)
-    if isinstance(scopes, str) and scopes.strip():
-        return "site" in scopes.strip().lower()
-    return True
-
-
-def _build_metric_candidates(const_metrics: Dict[str, Any]) -> List[MetricSpec]:
-    """Order Mist site-level traffic endpoints starting with /insights/site/{site_id}/stats."""
-    candidates: List[MetricSpec] = []
-    seen = set()
-
-    def add(spec: MetricSpec) -> None:
-        key = (spec.mode, spec.query_metrics)
-        if key not in seen:
-            seen.add(key)
-            candidates.append(spec)
-
-    site_keys: Dict[str, Dict[str, Any]] = {}
-    if isinstance(const_metrics, dict):
-        for k, meta in const_metrics.items():
-            if isinstance(k, str) and _is_site_metric(meta):
-                site_keys[k.strip()] = meta if isinstance(meta, dict) else {}
-
-    def scale_for(metric_key: str, kind: str) -> float:
-        meta = site_keys.get(metric_key) or {}
-        return _unit_multiplier(meta.get("unit") or meta.get("units"), kind)
-
-    # 1. Primary Mist Portal endpoint: GET /api/v1/sites/{site_id}/insights/site/{site_id}/stats
-    #    Returns {"rt": [...], "rx_bytes": [...], "tx_bytes": [...]} in a single call per site!
-    add(
-        MetricSpec(
-            query_metrics="rx_bytes,tx_bytes",
-            rx_key="rx_bytes",
-            tx_key="tx_bytes",
-            total_key=None,
-            kind="bytes",
-            unit_scale=scale_for("rx_bytes", "bytes"),
-            mode="site_stats",
-        )
-    )
-    add(
-        MetricSpec(
-            query_metrics="bytes",
-            rx_key=None,
-            tx_key=None,
-            total_key="bytes",
-            kind="bytes",
-            unit_scale=scale_for("bytes", "bytes"),
-            mode="site_stats",
-        )
-    )
-    add(
-        MetricSpec(
-            query_metrics="rx_bps,tx_bps",
-            rx_key="rx_bps",
-            tx_key="tx_bps",
-            total_key=None,
-            kind="bps",
-            unit_scale=scale_for("rx_bps", "bps"),
-            mode="site_stats",
-        )
-    )
-    add(
-        MetricSpec(
-            query_metrics="bps",
-            rx_key=None,
-            tx_key=None,
-            total_key="bps",
-            kind="bps",
-            unit_scale=scale_for("bps", "bps"),
-            mode="site_stats",
-        )
-    )
-
-    # 2. Secondary Mist path form: GET /api/v1/sites/{site_id}/insights/{metric}
-    add(
-        MetricSpec(
-            query_metrics="bytes",
-            rx_key=None,
-            tx_key=None,
-            total_key="bytes",
-            kind="bytes",
-            unit_scale=scale_for("bytes", "bytes"),
-            mode="path",
-        )
-    )
-    add(
-        MetricSpec(
-            query_metrics="rx_bytes,tx_bytes",
-            rx_key="rx_bytes",
-            tx_key="tx_bytes",
-            total_key=None,
-            kind="bytes",
-            unit_scale=scale_for("rx_bytes", "bytes"),
-            mode="paired_path",
-        )
-    )
-    add(
-        MetricSpec(
-            query_metrics="bps",
-            rx_key=None,
-            tx_key=None,
-            total_key="bps",
-            kind="bps",
-            unit_scale=scale_for("bps", "bps"),
-            mode="path",
-        )
-    )
-    add(
-        MetricSpec(
-            query_metrics="rx_bps,tx_bps",
-            rx_key="rx_bps",
-            tx_key="tx_bps",
-            total_key=None,
-            kind="bps",
-            unit_scale=scale_for("rx_bps", "bps"),
-            mode="paired_path",
-        )
-    )
-
-    return candidates
+class MistRateLimitError(RuntimeError):
+    """Raised immediately when Juniper Mist returns HTTP 429 so we stop issuing requests."""
 
 
 def _to_float(val: Any) -> Optional[float]:
@@ -278,7 +87,6 @@ def _norm_epoch_sec(ts_val: Any) -> int:
             if f > 1e12:
                 f = f / 1000.0
             return int(f)
-        # Parse ISO-8601 strings (e.g. "2026-11-19T12:00:00Z" or "2026-11-19 12:00:00")
         iso = s[:-1] + "+00:00" if s.endswith("Z") else s
         try:
             dt = datetime.fromisoformat(iso)
@@ -288,466 +96,6 @@ def _norm_epoch_sec(ts_val: Any) -> int:
         except ValueError:
             pass
     return 0
-
-
-def _extract_array_from_field(payload: Dict[str, Any], key: Optional[str]) -> Tuple[Optional[List[Any]], Optional[List[Any]]]:
-    """Return (values_list, optional_rt_list) for a given metric key in Mist /insights JSON."""
-    if not key or key not in payload:
-        return None, None
-    raw = payload.get(key)
-    if isinstance(raw, list):
-        return raw, None
-    if isinstance(raw, dict):
-        for list_key in ("data", "values", "results", "sum", "avg", "series"):
-            if isinstance(raw.get(list_key), list):
-                rt = raw.get("rt") if isinstance(raw.get("rt"), list) else None
-                return raw[list_key], rt
-    return None, None
-
-
-def _resolve_timestamps(
-    payload: Dict[str, Any],
-    length: int,
-    default_interval: int = 3600,
-    rt_override: Optional[List[Any]] = None,
-    fallback_start: int = 0,
-) -> Tuple[List[int], int]:
-    rt_top = payload.get("rt")
-    if not isinstance(rt_top, list):
-        rt_top = payload.get("timestamps") if isinstance(payload.get("timestamps"), list) else None
-
-    start_sec = _norm_epoch_sec(payload.get("start"))
-    end_sec = _norm_epoch_sec(payload.get("end"))
-    resp_interval = _parse_interval_sec(payload.get("interval"), default_interval)
-
-    rt_src = rt_override if isinstance(rt_override, list) and len(rt_override) >= length else rt_top
-    timestamps: List[int] = []
-    if isinstance(rt_src, list) and len(rt_src) >= length:
-        parsed_rt = [_norm_epoch_sec(rt_src[i]) for i in range(length)]
-        if sum(1 for t in parsed_rt if t > 0) > 0:
-            timestamps = parsed_rt
-
-    if not timestamps:
-        if start_sec > 0:
-            timestamps = [start_sec + i * resp_interval for i in range(length)]
-        elif end_sec > 0:
-            base = end_sec - length * resp_interval
-            timestamps = [base + i * resp_interval for i in range(length)]
-        elif fallback_start > 0:
-            timestamps = [fallback_start + i * resp_interval for i in range(length)]
-
-    step_sec = resp_interval
-    valid_ts = [t for t in timestamps if t > 0]
-    if len(valid_ts) >= 2:
-        diff = valid_ts[1] - valid_ts[0]
-        if 60 <= diff <= 86400:
-            step_sec = diff
-
-    return timestamps, step_sec
-
-
-def _extract_single_value_series(
-    payload: Any,
-    metric_key: Optional[str],
-    kind: str,
-    unit_scale: float = 1.0,
-    default_interval: int = 3600,
-) -> Tuple[List[Tuple[int, float]], bool]:
-    """Parse a single Mist /insights/{metric} response into [(ts, bytes_val), ...]."""
-    if not isinstance(payload, dict):
-        return [], False
-
-    # Case 1: Mist `results` array (numbers or dicts)
-    if isinstance(payload.get("results"), list):
-        results = payload["results"]
-        if len(results) == 0:
-            return [], True
-
-        non_null = [x for x in results if x is not None]
-        if not non_null:
-            return [], True
-
-        if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in non_null):
-            timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
-            if len(timestamps) < len(results):
-                return [], False
-            out: List[Tuple[int, float]] = []
-            for i, raw_v in enumerate(results):
-                ts = timestamps[i]
-                if ts <= 0:
-                    continue
-                val = (_to_float(raw_v) or 0.0) * unit_scale
-                b_val = (val * step_sec / 8.0) if kind == "bps" else val
-                out.append((ts, b_val))
-            return out, True
-
-        if any(isinstance(x, dict) for x in non_null):
-            timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
-            out = []
-            matched = False
-            candidate_keys = [k for k in (metric_key, "bytes", "total_bytes", "value", "sum", "bps", "bandwidth") if k]
-            for i, row in enumerate(results):
-                if not isinstance(row, dict):
-                    continue
-                ts = _norm_epoch_sec(row.get("ts") or row.get("timestamp") or row.get("rt") or row.get("time"))
-                if ts <= 0 and i < len(timestamps):
-                    ts = timestamps[i]
-                if ts <= 0:
-                    continue
-                chosen_k = next((ck for ck in candidate_keys if ck in row), None)
-                if chosen_k is None:
-                    continue
-                matched = True
-                val = (_to_float(row.get(chosen_k)) or 0.0) * unit_scale
-                b_val = (val * step_sec / 8.0) if kind == "bps" else val
-                out.append((ts, b_val))
-            return out, matched
-
-    # Case 2: Columnar array keyed by metric_key or values/data
-    arr, rt_override = _extract_array_from_field(payload, metric_key)
-    if arr is None:
-        for fallback_key in ("values", "data", "bytes", "bps"):
-            if isinstance(payload.get(fallback_key), list):
-                arr = payload[fallback_key]
-                break
-    if arr is None:
-        return [], False
-    if len(arr) == 0:
-        return [], True
-    timestamps, step_sec = _resolve_timestamps(payload, len(arr), default_interval, rt_override)
-    if len(timestamps) < len(arr):
-        return [], False
-    out = []
-    for i, raw_v in enumerate(arr):
-        ts = timestamps[i]
-        if ts <= 0:
-            continue
-        val = (_to_float(raw_v) or 0.0) * unit_scale
-        b_val = (val * step_sec / 8.0) if kind == "bps" else val
-        out.append((ts, b_val))
-    return out, True
-
-
-def _extract_site_series(
-    payload: Any,
-    spec: MetricSpec,
-    default_interval: int = 3600,
-) -> Tuple[List[Tuple[int, float, float, float]], bool]:
-    """Parse Mist site insights payload into [(ts, total_bytes, tx_bytes, rx_bytes), ...]."""
-    if not isinstance(payload, dict):
-        return [], False
-
-    # Format A: Columnar Mist response (the exact format of /insights/site/{site_id}/stats!)
-    # e.g. {"start": ..., "end": ..., "interval": 3600, "rt": [...], "rx_bytes": [...], "tx_bytes": [...]}
-    if spec.rx_key and spec.tx_key:
-        rx_arr, rx_rt = _extract_array_from_field(payload, spec.rx_key)
-        tx_arr, tx_rt = _extract_array_from_field(payload, spec.tx_key)
-        if rx_arr is not None or tx_arr is not None:
-            n = max(len(rx_arr or []), len(tx_arr or []))
-            if n == 0:
-                return [], True
-            timestamps, step_sec = _resolve_timestamps(payload, n, default_interval, rx_rt or tx_rt)
-            if len(timestamps) < n:
-                return [], False
-            points: List[Tuple[int, float, float, float]] = []
-            for i in range(n):
-                ts = timestamps[i]
-                if ts <= 0:
-                    continue
-                rx_raw = (_to_float(rx_arr[i]) if rx_arr is not None and i < len(rx_arr) else None) or 0.0
-                tx_raw = (_to_float(tx_arr[i]) if tx_arr is not None and i < len(tx_arr) else None) or 0.0
-                rx_val = rx_raw * spec.unit_scale
-                tx_val = tx_raw * spec.unit_scale
-                if spec.kind == "bps":
-                    rx_b = rx_val * step_sec / 8.0
-                    tx_b = tx_val * step_sec / 8.0
-                else:
-                    rx_b, tx_b = rx_val, tx_val
-                points.append((ts, rx_b + tx_b, tx_b, rx_b))
-            return points, True
-
-    # Format B: `results` array (plain numbers OR dicts with rx/tx or total)
-    if isinstance(payload.get("results"), list):
-        results = payload["results"]
-        if len(results) == 0:
-            return [], True
-
-        non_null = [x for x in results if x is not None]
-        if not non_null:
-            return [], True
-
-        if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in non_null):
-            if spec.rx_key and spec.tx_key and not spec.total_key:
-                return [], False
-            timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
-            if len(timestamps) < len(results):
-                return [], False
-            points = []
-            for i, raw_v in enumerate(results):
-                ts = timestamps[i]
-                if ts <= 0:
-                    continue
-                val = (_to_float(raw_v) or 0.0) * spec.unit_scale
-                tot_b = (val * step_sec / 8.0) if spec.kind == "bps" else val
-                points.append((ts, tot_b, 0.0, 0.0))
-            return points, True
-
-        if any(isinstance(x, dict) for x in non_null):
-            timestamps, step_sec = _resolve_timestamps(payload, len(results), default_interval)
-            points = []
-            matched_any = False
-            rx_aliases = [k for k in (spec.rx_key, "rx_bytes", "rx", "rx_bps", "bytes_rx") if k]
-            tx_aliases = [k for k in (spec.tx_key, "tx_bytes", "tx", "tx_bps", "bytes_tx") if k]
-            tot_aliases = [k for k in (spec.total_key, "bytes", "total_bytes", "value", "sum", "bps", "bandwidth") if k]
-
-            for i, row in enumerate(results):
-                if not isinstance(row, dict):
-                    continue
-                ts = _norm_epoch_sec(row.get("ts") or row.get("timestamp") or row.get("rt") or row.get("time"))
-                if ts <= 0 and i < len(timestamps):
-                    ts = timestamps[i]
-                if ts <= 0:
-                    continue
-
-                rx_k = next((k for k in rx_aliases if k in row), None)
-                tx_k = next((k for k in tx_aliases if k in row), None)
-                if rx_k or tx_k:
-                    matched_any = True
-                    rx_val = (_to_float(row.get(rx_k)) if rx_k else 0.0) or 0.0
-                    tx_val = (_to_float(row.get(tx_k)) if tx_k else 0.0) or 0.0
-                    rx_val *= spec.unit_scale
-                    tx_val *= spec.unit_scale
-                    if spec.kind == "bps":
-                        rx_b = rx_val * step_sec / 8.0
-                        tx_b = tx_val * step_sec / 8.0
-                    else:
-                        rx_b, tx_b = rx_val, tx_val
-                    points.append((ts, rx_b + tx_b, tx_b, rx_b))
-                    continue
-
-                tot_k = next((k for k in tot_aliases if k in row), None)
-                if tot_k:
-                    matched_any = True
-                    tot_val = (_to_float(row.get(tot_k)) or 0.0) * spec.unit_scale
-                    tot_b = (tot_val * step_sec / 8.0) if spec.kind == "bps" else tot_val
-                    points.append((ts, tot_b, 0.0, 0.0))
-            return points, matched_any
-
-    # Format C: Single metric columnar array
-    single_pts, ok = _extract_single_value_series(
-        payload,
-        metric_key=spec.total_key,
-        kind=spec.kind,
-        unit_scale=spec.unit_scale,
-        default_interval=default_interval,
-    )
-    if not ok:
-        return [], False
-    return [(ts, tot_b, 0.0, 0.0) for ts, tot_b in single_pts], True
-
-
-def _get_json_with_interval_fallback(
-    session: requests.Session,
-    url: str,
-    base_params: Dict[str, str],
-    interval_val: str = "3600",
-) -> Tuple[Optional[Any], Optional[str]]:
-    """GET Mist insights endpoint with `interval=3600`, retrying without `interval` on HTTP 400."""
-    params_with_int = dict(base_params)
-    if interval_val:
-        params_with_int["interval"] = interval_val
-    try:
-        resp = session.get(url, params=params_with_int, timeout=20)
-    except Exception as exc:
-        return None, str(exc)
-
-    if resp.status_code == 400 and interval_val:
-        try:
-            resp = session.get(url, params=base_params, timeout=20)
-        except Exception as exc:
-            return None, str(exc)
-
-    if resp.status_code != 200:
-        return None, f"HTTP {resp.status_code}"
-
-    try:
-        return resp.json(), None
-    except Exception as exc:
-        return None, f"Invalid JSON: {exc}"
-
-
-def _describe_payload_shape(payload: Any) -> str:
-    if isinstance(payload, dict):
-        keys = list(payload.keys())[:8]
-        return f"dict keys={keys}"
-    if isinstance(payload, list):
-        return f"list len={len(payload)}"
-    return type(payload).__name__
-
-
-def _summarize_raw_probe(session: requests.Session, api_host: str, site_id: str, start_ts: int, end_ts: int) -> str:
-    """Safely inspect structural metadata (no secrets/PII) of Mist EU responses when traffic sums to 0."""
-    parts: List[str] = []
-    probes = [
-        ("site_stats", f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats", {"start": str(start_ts), "end": str(end_ts), "interval": "3600", "metrics": "rx_bytes,tx_bytes"}),
-        ("site_stats_1h", f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats", {"duration": "5d", "interval": "1h", "metrics": "rx_bytes,tx_bytes"}),
-        ("path_bytes", f"{api_host}/api/v1/sites/{site_id}/insights/bytes", {"start": str(start_ts), "end": str(end_ts), "interval": "1h"}),
-        ("path_rx_bytes", f"{api_host}/api/v1/sites/{site_id}/insights/rx_bytes", {"start": str(start_ts), "end": str(end_ts), "interval": "1h"}),
-    ]
-    for label, url, params in probes:
-        try:
-            r = session.get(url, params=params, timeout=12)
-            if r.status_code != 200:
-                parts.append(f"{label}=HTTP {r.status_code}")
-                continue
-            j = r.json()
-            if isinstance(j, dict):
-                summary_bits = [f"keys={list(j.keys())[:6]}"]
-                for k in ("start", "end", "interval"):
-                    if k in j:
-                        summary_bits.append(f"{k}={j[k]}")
-                for k in ("rt", "rx_bytes", "tx_bytes", "bytes", "results"):
-                    v = j.get(k)
-                    if isinstance(v, list):
-                        non_zero = sum(1 for x in v if isinstance(x, (int, float)) and x > 0)
-                        sample = v[:2]
-                        summary_bits.append(f"{k}[len={len(v)},nz={non_zero},s={sample}]")
-                    elif v is not None:
-                        summary_bits.append(f"{k}={type(v).__name__}")
-                parts.append(f"{label}({', '.join(summary_bits)})")
-            else:
-                parts.append(f"{label}={type(j).__name__}")
-        except Exception as exc:
-            parts.append(f"{label}=err({exc})")
-    return " | ".join(parts)
-
-
-def _query_site_insights(
-    session: requests.Session,
-    api_host: str,
-    site_id: str,
-    spec: MetricSpec,
-    start_ts: int,
-    end_ts: int,
-    interval_val: str = "3600",
-    allow_duration_fallback: bool = True,
-) -> Tuple[Optional[List[Tuple[int, float, float, float]]], Optional[str]]:
-    """Strictly read-only GET query to Mist site insights for one site."""
-    base_params = {"start": str(start_ts), "end": str(end_ts)}
-    default_int = _parse_interval_sec(interval_val, 3600)
-
-    if spec.mode == "site_stats":
-        url = f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats"
-        q_params = dict(base_params)
-        q_params["metrics"] = spec.query_metrics
-        payload, err = _get_json_with_interval_fallback(session, url, q_params, interval_val)
-        if payload is None:
-            return None, err
-        points, ok = _extract_site_series(payload, spec, default_interval=default_int)
-        if ok and sum(p[1] for p in points) > 0:
-            return points, None
-        # Retry with duration=Nd & interval=1h only for rolling "latest N days" queries
-        if allow_duration_fallback:
-            dur_days = max(1, int(round((end_ts - start_ts) / 86400.0)))
-            dur_params = {"duration": f"{dur_days}d", "interval": "1h", "metrics": spec.query_metrics}
-            payload2, _ = _get_json_with_interval_fallback(session, url, dur_params, "")
-            if payload2 is not None:
-                points2, ok2 = _extract_site_series(payload2, spec, default_interval=3600)
-                if ok2 and sum(p[1] for p in points2) > 0:
-                    return points2, None
-        if not ok:
-            return None, f"unparsed ({_describe_payload_shape(payload)})"
-        return points, None
-
-    if spec.mode == "paired_path" and spec.rx_key and spec.tx_key:
-        rx_url = f"{api_host}/api/v1/sites/{site_id}/insights/{spec.rx_key}"
-        tx_url = f"{api_host}/api/v1/sites/{site_id}/insights/{spec.tx_key}"
-        rx_payload, rx_err = _get_json_with_interval_fallback(session, rx_url, base_params, interval_val)
-        if rx_payload is None:
-            return None, f"{spec.rx_key}: {rx_err}"
-        tx_payload, tx_err = _get_json_with_interval_fallback(session, tx_url, base_params, interval_val)
-        if tx_payload is None:
-            return None, f"{spec.tx_key}: {tx_err}"
-
-        rx_pts, rx_ok = _extract_single_value_series(rx_payload, spec.rx_key, spec.kind, spec.unit_scale, default_interval=default_int)
-        tx_pts, tx_ok = _extract_single_value_series(tx_payload, spec.tx_key, spec.kind, spec.unit_scale, default_interval=default_int)
-        if not (rx_ok and tx_ok):
-            return None, f"unparsed ({_describe_payload_shape(rx_payload)})"
-
-        merged: Dict[int, List[float]] = {}
-        for ts, rx_b in rx_pts:
-            merged.setdefault(ts, [0.0, 0.0])[0] += rx_b
-        for ts, tx_b in tx_pts:
-            merged.setdefault(ts, [0.0, 0.0])[1] += tx_b
-        out = [(ts, vals[0] + vals[1], vals[1], vals[0]) for ts, vals in sorted(merged.items())]
-        return out, None
-
-    metric_name = spec.total_key or spec.query_metrics
-    url = f"{api_host}/api/v1/sites/{site_id}/insights/{metric_name}"
-    payload, err = _get_json_with_interval_fallback(session, url, base_params, interval_val)
-    if payload is None:
-        return None, err
-
-    points, ok = _extract_site_series(payload, spec, default_interval=default_int)
-    if not ok:
-        return None, f"unparsed ({_describe_payload_shape(payload)})"
-    return points, None
-
-
-def _load_sites(
-    session: requests.Session,
-    api_host: str,
-    org_id: str,
-    site_name_map: Optional[Dict[str, str]] = None,
-    prioritized_site_ids: Optional[List[str]] = None,
-) -> Tuple[Dict[str, str], List[str]]:
-    sites = dict(site_name_map or {})
-    live_priority: List[str] = list(prioritized_site_ids or [])
-
-    if not sites or not live_priority:
-        # Try /orgs/{org_id}/stats/sites first: gives site names AND live client/AP counts so we probe active sites first!
-        try:
-            resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/stats/sites", params={"limit": 1000}, timeout=20)
-            if resp.status_code == 200:
-                raw_stats = resp.json()
-                if isinstance(raw_stats, list) and raw_stats:
-                    scored: List[Tuple[int, int, str]] = []
-                    for s in raw_stats:
-                        if not isinstance(s, dict) or not s.get("id"):
-                            continue
-                        sid = str(s["id"])
-                        if sid not in sites:
-                            sites[sid] = str(s.get("name") or sid)
-                        num_clients = int(_to_float(s.get("num_clients")) or 0)
-                        num_aps = int(_to_float(s.get("num_aps")) or 0)
-                        scored.append((num_clients, num_aps, sid))
-                    if not live_priority and scored:
-                        scored.sort(key=lambda t: (-t[0], -t[1], sites.get(t[2], "").lower()))
-                        live_priority = [t[2] for t in scored]
-        except Exception:
-            pass
-
-    if not sites:
-        resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/sites", params={"limit": 1000}, timeout=20)
-        resp.raise_for_status()
-        raw = resp.json()
-        if isinstance(raw, list):
-            for s in raw:
-                if isinstance(s, dict) and s.get("id"):
-                    sites[str(s["id"])] = str(s.get("name") or s["id"])
-
-    ordered_ids: List[str] = []
-    seen = set()
-    for sid in live_priority:
-        if sid in sites and sid not in seen:
-            seen.add(sid)
-            ordered_ids.append(sid)
-    for sid, _ in sorted(sites.items(), key=lambda kv: kv[1].lower()):
-        if sid not in seen:
-            seen.add(sid)
-            ordered_ids.append(sid)
-
-    return sites, ordered_ids
 
 
 def parse_local_datetime_to_epoch(raw: Optional[str]) -> Optional[int]:
@@ -770,6 +118,181 @@ def parse_local_datetime_to_epoch(raw: Optional[str]) -> Optional[int]:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=DISPLAY_TZ)
     return int(dt.timestamp())
+
+
+def _resolve_timestamps(
+    payload: Dict[str, Any],
+    length: int,
+    default_interval: int = 3600,
+) -> Tuple[List[int], int]:
+    rt_top = payload.get("rt")
+    if not isinstance(rt_top, list):
+        rt_top = payload.get("timestamps") if isinstance(payload.get("timestamps"), list) else None
+
+    start_sec = _norm_epoch_sec(payload.get("start"))
+    end_sec = _norm_epoch_sec(payload.get("end"))
+    resp_interval = _parse_interval_sec(payload.get("interval"), default_interval)
+
+    timestamps: List[int] = []
+    if isinstance(rt_top, list) and len(rt_top) >= length:
+        parsed_rt = [_norm_epoch_sec(rt_top[i]) for i in range(length)]
+        if sum(1 for t in parsed_rt if t > 0) > 0:
+            timestamps = parsed_rt
+
+    if not timestamps:
+        if start_sec > 0:
+            timestamps = [start_sec + i * resp_interval for i in range(length)]
+        elif end_sec > 0:
+            base = end_sec - length * resp_interval
+            timestamps = [base + i * resp_interval for i in range(length)]
+
+    step_sec = resp_interval
+    valid_ts = [t for t in timestamps if t > 0]
+    if len(valid_ts) >= 2:
+        diff = valid_ts[1] - valid_ts[0]
+        if 60 <= diff <= 86400:
+            step_sec = diff
+
+    return timestamps, step_sec
+
+
+def _parse_site_stats_payload(
+    payload: Any,
+    default_interval: int = 3600,
+) -> List[Tuple[int, float, float, float]]:
+    """Parse Mist /sites/{site_id}/insights/site/{site_id}/stats rx_bytes,tx_bytes payload."""
+    if not isinstance(payload, dict):
+        return []
+    rx_arr = payload.get("rx_bytes") if isinstance(payload.get("rx_bytes"), list) else None
+    tx_arr = payload.get("tx_bytes") if isinstance(payload.get("tx_bytes"), list) else None
+    if rx_arr is None and tx_arr is None:
+        return []
+    n = max(len(rx_arr or []), len(tx_arr or []))
+    if n == 0:
+        return []
+
+    timestamps, _ = _resolve_timestamps(payload, n, default_interval=default_interval)
+    if len(timestamps) < n:
+        return []
+
+    points: List[Tuple[int, float, float, float]] = []
+    for i in range(n):
+        ts = timestamps[i]
+        if ts <= 0:
+            continue
+        rx_b = (_to_float(rx_arr[i]) if rx_arr is not None and i < len(rx_arr) else None) or 0.0
+        tx_b = (_to_float(tx_arr[i]) if tx_arr is not None and i < len(tx_arr) else None) or 0.0
+        points.append((ts, rx_b + tx_b, tx_b, rx_b))
+    return points
+
+
+def _fetch_one_site_traffic(
+    session: requests.Session,
+    api_host: str,
+    site_id: str,
+    start_ts: int,
+    end_ts: int,
+    interval_sec: int,
+    rate_limit_flag: threading.Event,
+) -> Tuple[Optional[List[Tuple[int, float, float, float]]], Optional[str]]:
+    """Single strictly read-only GET call per site; aborts cleanly on HTTP 429."""
+    if rate_limit_flag.is_set():
+        return None, "HTTP 429"
+
+    url = f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats"
+    params = {
+        "start": str(start_ts),
+        "end": str(end_ts),
+        "interval": str(interval_sec),
+        "metrics": "rx_bytes,tx_bytes",
+    }
+    try:
+        resp = session.get(url, params=params, timeout=20)
+    except Exception as exc:
+        return None, str(exc)
+
+    if resp.status_code == 429:
+        rate_limit_flag.set()
+        return None, "HTTP 429"
+
+    if resp.status_code == 400 and interval_sec != 3600:
+        # If Mist rejects 600s for this window, fall back once to 3600s
+        params["interval"] = "3600"
+        try:
+            resp = session.get(url, params=params, timeout=20)
+        except Exception as exc:
+            return None, str(exc)
+        if resp.status_code == 429:
+            rate_limit_flag.set()
+            return None, "HTTP 429"
+
+    if resp.status_code != 200:
+        return None, f"HTTP {resp.status_code}"
+
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        return None, f"Invalid JSON: {exc}"
+
+    return _parse_site_stats_payload(payload, default_interval=interval_sec), None
+
+
+def _load_sites(
+    session: requests.Session,
+    api_host: str,
+    org_id: str,
+    site_name_map: Optional[Dict[str, str]] = None,
+    active_site_ids: Optional[List[str]] = None,
+) -> Tuple[Dict[str, str], List[str]]:
+    """Return (all_sites_map, active_site_ids_to_query). Skips 0-AP sites to save Mist API quota."""
+    sites = dict(site_name_map or {})
+    query_ids: List[str] = list(active_site_ids or [])
+
+    if not sites or not query_ids:
+        resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/stats/sites", params={"limit": 1000}, timeout=20)
+        if resp.status_code == 429:
+            raise MistRateLimitError("Mist EU API rate limit (5,000 calls/hour) reached. Please wait a few minutes and try again.")
+        if resp.status_code == 200:
+            raw_stats = resp.json()
+            if isinstance(raw_stats, list) and raw_stats:
+                scored: List[Tuple[int, int, str]] = []
+                for s in raw_stats:
+                    if not isinstance(s, dict) or not s.get("id"):
+                        continue
+                    sid = str(s["id"])
+                    if sid not in sites:
+                        sites[sid] = str(s.get("name") or sid)
+                    num_aps = int(_to_float(s.get("num_aps")) or 0)
+                    num_clients = int(_to_float(s.get("num_clients")) or 0)
+                    if num_aps > 0 or num_clients > 0:
+                        scored.append((num_clients, num_aps, sid))
+                if not query_ids and scored:
+                    scored.sort(key=lambda t: (-t[0], -t[1], sites.get(t[2], "").lower()))
+                    query_ids = [t[2] for t in scored]
+
+    if not sites:
+        resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/sites", params={"limit": 1000}, timeout=20)
+        if resp.status_code == 429:
+            raise MistRateLimitError("Mist EU API rate limit (5,000 calls/hour) reached. Please wait a few minutes and try again.")
+        resp.raise_for_status()
+        raw = resp.json()
+        if isinstance(raw, list):
+            for s in raw:
+                if isinstance(s, dict) and s.get("id"):
+                    sites[str(s["id"])] = str(s.get("name") or s["id"])
+
+    if not query_ids:
+        query_ids = [sid for sid, _ in sorted(sites.items(), key=lambda kv: kv[1].lower())]
+    else:
+        seen = set()
+        deduped: List[str] = []
+        for sid in query_ids:
+            if sid in sites and sid not in seen:
+                seen.add(sid)
+                deduped.append(sid)
+        query_ids = deduped
+
+    return sites, query_ids
 
 
 def _format_bucket_label(dt: datetime, span_sec: int) -> str:
@@ -803,7 +326,7 @@ def collect_traffic_usage(
     start_ts: Optional[int] = None,
     end_ts: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Strictly read-only Mist traffic usage collector across a preset (1/5/7d) or custom date/time range."""
+    """Strictly read-only Mist traffic usage collector using 1 call per active site (rate-limit safe)."""
     now_epoch = int(now_ts if now_ts is not None else time.time())
     is_custom = start_ts is not None or end_ts is not None
 
@@ -830,23 +353,17 @@ def collect_traffic_usage(
         span_sec = end_ts_val - start_ts_val
         effective_days = days
 
-    # Use 10-minute buckets when zooming into <= 12h within the last 24h (Mist's 10m retention); hourly otherwise
     if is_custom and span_sec <= 12 * 3600 and (now_epoch - start_ts_val) <= 86400:
         bucket_sec = 600
-        interval_str = "600"
         granularity_label = "10-min buckets"
     else:
         bucket_sec = 3600
-        interval_str = "3600"
         granularity_label = "Hourly buckets"
 
     first_bucket = (start_ts_val // bucket_sec) * bucket_sec
     last_bucket = (end_ts_val // bucket_sec) * bucket_sec
-    # If end_ts falls exactly on a bucket boundary for a custom range (e.g. 23:00 or 00:00 next day), avoid trailing empty bucket
     if is_custom and end_ts_val % bucket_sec == 0 and last_bucket > first_bucket:
         last_bucket -= bucket_sec
-
-    allow_dur_fallback = (not is_custom) and (now_epoch - end_ts_val) < 600
 
     dt_start_local = datetime.fromtimestamp(start_ts_val, tz=timezone.utc).astimezone(DISPLAY_TZ)
     dt_end_local = datetime.fromtimestamp(end_ts_val, tz=timezone.utc).astimezone(DISPLAY_TZ)
@@ -856,12 +373,12 @@ def collect_traffic_usage(
         else DAY_LABELS.get(days, f"Last {days} Days")
     )
 
-    sites_map, ordered_site_ids = _load_sites(
+    sites_map, active_site_ids = _load_sites(
         session=session,
         api_host=api_host,
         org_id=org_id,
         site_name_map=site_name_map,
-        prioritized_site_ids=prioritized_site_ids,
+        active_site_ids=prioritized_site_ids,
     )
 
     available_sites = [
@@ -872,7 +389,7 @@ def collect_traffic_usage(
     selected_site = (site_id or "").strip()
     if selected_site.lower() in ("", "all"):
         selected_site = "all"
-        target_site_ids = ordered_site_ids
+        target_site_ids = active_site_ids
         selected_site_name = "All Sites (Org Total)"
     else:
         if selected_site not in sites_map:
@@ -880,105 +397,70 @@ def collect_traffic_usage(
         target_site_ids = [selected_site]
         selected_site_name = sites_map[selected_site]
 
-    const_metrics = _fetch_const_insight_metrics(session, api_host)
-    candidates = _build_metric_candidates(const_metrics)
-
-    warnings: List[str] = []
-    chosen_spec: Optional[MetricSpec] = None
-    prefetched: Dict[str, List[Tuple[int, float, float, float]]] = {}
-
-    # Probe busiest active site(s) to verify the exact working Mist traffic endpoint & metric
-    probe_sites = target_site_ids[:5]
-    best_zero_spec: Optional[MetricSpec] = None
-    best_zero_prefetched: Dict[str, List[Tuple[int, float, float, float]]] = {}
-    probe_errors: List[str] = []
-
-    for spec in candidates:
-        spec_hits: Dict[str, List[Tuple[int, float, float, float]]] = {}
-        total_nonzero = 0.0
-        any_ok = False
-        last_err: Optional[str] = None
-        for sid in probe_sites:
-            pts, err = _query_site_insights(
-                session,
-                api_host,
-                sid,
-                spec,
-                start_ts_val,
-                end_ts_val,
-                interval_str,
-                allow_duration_fallback=allow_dur_fallback,
-            )
-            if pts is not None:
-                any_ok = True
-                spec_hits[sid] = pts
-                total_nonzero += sum(p[1] for p in pts)
-                if total_nonzero > 0:
-                    break
-            elif err:
-                last_err = err
-        if any_ok and total_nonzero > 0:
-            chosen_spec = spec
-            prefetched = spec_hits
-            break
-        if any_ok and best_zero_spec is None:
-            best_zero_spec = spec
-            best_zero_prefetched = spec_hits
-        elif last_err and len(probe_errors) < 5:
-            probe_errors.append(f"{spec.query_metrics}[{spec.mode}]: {last_err}")
-
-    if chosen_spec is None and best_zero_spec is not None:
-        chosen_spec = best_zero_spec
-        prefetched = best_zero_prefetched
-
-    if chosen_spec is None:
-        diag = "; ".join(probe_errors) if probe_errors else "no candidates returned data"
-        warnings.append(
-            f"Mist Insights did not return a recognized site traffic metric ({diag})."
-        )
-        chosen_spec = candidates[0]
-
-    # Fetch remaining sites in parallel
-    site_series: Dict[str, List[Tuple[int, float, float, float]]] = dict(prefetched)
-    remaining_ids = [sid for sid in target_site_ids if sid not in site_series]
+    rate_limit_flag = threading.Event()
+    site_series: Dict[str, List[Tuple[int, float, float, float]]] = {}
     sites_failed = 0
+    warnings: List[str] = []
 
-    if remaining_ids and not warnings:
-        max_workers = min(10, len(remaining_ids))
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {
-                pool.submit(
-                    _query_site_insights,
-                    session,
-                    api_host,
-                    sid,
-                    chosen_spec,
-                    start_ts_val,
-                    end_ts_val,
-                    interval_str,
-                    allow_dur_fallback,
-                ): sid
-                for sid in remaining_ids
-            }
-            for fut in as_completed(futs):
-                sid = futs[fut]
-                try:
-                    pts, err = fut.result()
-                except Exception:
-                    pts, err = None, "request error"
-                if pts is not None:
-                    site_series[sid] = pts
-                else:
-                    sites_failed += 1
+    if target_site_ids:
+        # Check the first site synchronously first so a 429 stops immediately after 1 call instead of a burst!
+        first_sid = target_site_ids[0]
+        first_pts, first_err = _fetch_one_site_traffic(
+            session, api_host, first_sid, start_ts_val, end_ts_val, bucket_sec, rate_limit_flag
+        )
+        if rate_limit_flag.is_set():
+            raise MistRateLimitError(
+                "Mist EU API rate limit (5,000 calls/hour) was reached. Wait a few minutes for the hourly window to recover, then click Refresh."
+            )
+        if first_pts is not None:
+            site_series[first_sid] = first_pts
+        else:
+            sites_failed += 1
 
-    if sites_failed > 0:
-        warnings.append(f"{sites_failed} site(s) did not return traffic metrics for this period.")
+        remaining_ids = target_site_ids[1:]
+        if remaining_ids:
+            max_workers = min(5, len(remaining_ids))
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futs = {
+                    pool.submit(
+                        _fetch_one_site_traffic,
+                        session,
+                        api_host,
+                        sid,
+                        start_ts_val,
+                        end_ts_val,
+                        bucket_sec,
+                        rate_limit_flag,
+                    ): sid
+                    for sid in remaining_ids
+                }
+                for fut in as_completed(futs):
+                    sid = futs[fut]
+                    try:
+                        pts, err = fut.result()
+                    except Exception:
+                        pts, err = None, "request error"
+                    if pts is not None:
+                        site_series[sid] = pts
+                    else:
+                        sites_failed += 1
+
+        if rate_limit_flag.is_set():
+            if not site_series:
+                raise MistRateLimitError(
+                    "Mist EU API rate limit (5,000 calls/hour) was reached. Wait a few minutes and click Refresh."
+                )
+            warnings.append(
+                f"Mist EU rate limit (HTTP 429) hit partway through — showing partial data from {len(site_series)} of {len(target_site_ids)} sites."
+            )
+        elif sites_failed > 0:
+            warnings.append(f"{sites_failed} site(s) did not return traffic metrics for this period.")
 
     # Prepare aligned buckets across the full window
     bucket_totals: Dict[int, List[float]] = {}
     cursor = first_bucket
     while cursor <= last_bucket:
-        bucket_totals[cursor] = [0.0, 0.0, 0.0]  # [total_bytes, tx_bytes, rx_bytes]
+        bucket_totals[cursor] = [0.0, 0.0, 0.0]
         cursor += bucket_sec
 
     top_sites_raw: List[Dict[str, Any]] = []
@@ -1172,8 +654,8 @@ def collect_traffic_usage(
         "bucket_seconds": bucket_sec,
         "granularity_label": granularity_label,
         "can_step_next": end_ts_val < (now_epoch - 300),
-        "metric_used": f"{chosen_spec.query_metrics} ({chosen_spec.mode})",
-        "metric_kind": chosen_spec.kind,
+        "metric_used": "rx_bytes,tx_bytes (site_stats)",
+        "metric_kind": "bytes",
         "has_rx_tx_split": has_rx_tx_split,
         "sites_queried": len(target_site_ids),
         "sites_with_data": sites_with_data,

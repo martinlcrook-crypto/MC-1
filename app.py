@@ -13,7 +13,7 @@ import requests
 from history_store import init_history_db, query_history, record_snapshot
 from nac_rejects import collect_nac_server_rejects
 from client_lookup import get_wifi_client_detail, search_wifi_clients
-from traffic_stats import collect_traffic_usage, parse_local_datetime_to_epoch
+from traffic_stats import MistRateLimitError, collect_traffic_usage, parse_local_datetime_to_epoch
 
 
 def load_dotenv(path: Path) -> None:
@@ -54,7 +54,7 @@ load_dotenv(BASE_DIR / ".env")
 MIST_API_HOST = os.getenv("MIST_API_HOST", "https://api.eu.mist.com").rstrip("/")
 MIST_ORG_ID = os.getenv("MIST_ORG_ID", "").strip()
 MIST_API_TOKEN = os.getenv("MIST_API_TOKEN", "").strip()
-CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "60"))
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "180"))
 MIN_REFRESH_INTERVAL = 15
 AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "1").strip().lower() not in ("0", "false", "no")
 SESSION_LIFETIME_HOURS = int(os.getenv("SESSION_LIFETIME_HOURS", "12"))
@@ -327,6 +327,10 @@ def fetch_site_telemetry(
         for ap in aps
         if str(ap.get("status") or "").lower() == "connected"
     )
+
+    # Skip calling /stats/clients for sites that have 0 connected AP clients (saves ~15-20 Mist calls/refresh)
+    if warning is None and site_ap_clients == 0:
+        return site_id, [], aps, warning
 
     try:
         # /api/v1/sites/{site_id}/stats/clients returns live connected clients and does NOT
@@ -1301,7 +1305,7 @@ def api_client_lookup_detail():
 
 _traffic_cache_lock = threading.Lock()
 _traffic_cache: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
-TRAFFIC_CACHE_TTL_SECONDS = int(os.getenv("TRAFFIC_CACHE_TTL_SECONDS", "300"))
+TRAFFIC_CACHE_TTL_SECONDS = int(os.getenv("TRAFFIC_CACHE_TTL_SECONDS", "900"))
 TRAFFIC_CACHE_MAX_ENTRIES = 64
 
 
@@ -1310,7 +1314,11 @@ def _cached_prioritized_site_ids() -> List[str]:
     with _cache_lock:
         if isinstance(_cache_data, dict):
             for s in _cache_data.get("sites") or []:
-                if isinstance(s, dict) and s.get("id"):
+                if not isinstance(s, dict) or not s.get("id"):
+                    continue
+                aps_count = int(s.get("aps_online") or 0) + int(s.get("aps_offline") or 0)
+                users_count = int(s.get("total_users") or 0)
+                if aps_count > 0 or users_count > 0:
                     ordered.append(str(s["id"]))
     return ordered
 
@@ -1370,6 +1378,8 @@ def api_traffic():
             start_ts=start_ts,
             end_ts=end_ts,
         )
+    except MistRateLimitError as exc:
+        return jsonify({"error": str(exc)}), 429
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except requests.HTTPError as exc:
@@ -1381,11 +1391,14 @@ def api_traffic():
         session.close()
 
     fresh["fetched_at"] = datetime.now(timezone.utc).isoformat()
-    with _traffic_cache_lock:
-        if len(_traffic_cache) >= TRAFFIC_CACHE_MAX_ENTRIES:
-            oldest_key = min(_traffic_cache.items(), key=lambda kv: kv[1][0])[0]
-            _traffic_cache.pop(oldest_key, None)
-        _traffic_cache[cache_key] = (time.time(), fresh)
+    # Only cache valid non-partial responses so transient rate limits or empty errors never stick in cache
+    has_data = (fresh.get("summary") or {}).get("total_bytes", 0) > 0
+    if has_data and not fresh.get("warnings"):
+        with _traffic_cache_lock:
+            if len(_traffic_cache) >= TRAFFIC_CACHE_MAX_ENTRIES:
+                oldest_key = min(_traffic_cache.items(), key=lambda kv: kv[1][0])[0]
+                _traffic_cache.pop(oldest_key, None)
+            _traffic_cache[cache_key] = (time.time(), fresh)
 
     out = dict(fresh)
     out["cached"] = False

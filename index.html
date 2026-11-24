@@ -2859,7 +2859,7 @@
           return;
         }
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-        countdown = data.cache_ttl_seconds || 60; renderDashboard(data);
+        countdown = data.cache_ttl_seconds || 180; renderDashboard(data);
         if (data.warnings && data.warnings.length) { banner.textContent = "Partial data notice: " + data.warnings.join(" | "); banner.style.display = "block"; }
       } catch (err) { banner.textContent = "Error loading Mist data: " + err.message; banner.style.display = "block"; }
       finally { btn.disabled = false; }
@@ -2874,7 +2874,7 @@
     });
     setInterval(() => {
       countdown -= 1;
-      if (countdown <= 0) { countdown = 60; loadStats(false); }
+      if (countdown <= 0) { countdown = latestData?.cache_ttl_seconds || 180; loadStats(false); }
       else if (latestData) { const fetched = latestData.fetched_at ? new Date(latestData.fetched_at).toLocaleTimeString() : "just now"; document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`; }
     }, 1000);
     (() => {

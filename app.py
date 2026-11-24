@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
+import re
 import secrets
 import threading
 import time
@@ -96,6 +97,7 @@ _active_ap_sites_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
 _slow_aps_scan_lock = threading.Lock()
 
 _vc_temps_cache: Tuple[float, Optional[List[Dict[str, Any]]], str] = (0.0, None, "not_scanned")
+_vc_member_issues_cache: Tuple[float, List[Dict[str, Any]], str] = (0.0, [], "not_scanned")
 _active_switch_sites_cache: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
 _vc_temps_scan_lock = threading.Lock()
 _vc_temp_threshold_lock = threading.Lock()
@@ -491,6 +493,377 @@ def _build_vc_temps_view(
     if calls_used is not None:
         meta["calls_used"] = calls_used
     return evaluated, meta
+
+
+_VC_DOWN_STATE_TOKENS = (
+    "notpresent", "not_present", "not-present", "not present",
+    "inactive", "offline", "absent", "down", "disconnected",
+    "unprovisioned", "dead", "fault", "failed", "error",
+    "wedge", "wedged", "unresponsive", "panic", "resetting",
+)
+_VC_HEALTHY_STATE_TOKENS = ("present", "prsnt", "online", "ok", "ready", "up", "active", "normal")
+_FPC_PFE_TOKEN_RE = re.compile(r"\b(?:FPC|PFE|PIC|Linecard)\s*[-:#]?\s*\d+\b", re.IGNORECASE)
+
+
+def _is_down_member_state(raw_state: Any) -> bool:
+    s = str(raw_state or "").strip().lower()
+    if not s or s in _VC_HEALTHY_STATE_TOKENS:
+        return False
+    return any(tok in s for tok in _VC_DOWN_STATE_TOKENS)
+
+
+def _extract_pfe_faults_from_obj(container: Any, default_prefix: str = "PFE") -> List[Tuple[str, str]]:
+    """Return list of (pfe_label, state_str) for any PFE reporting down/offline/fault."""
+    faults: List[Tuple[str, str]] = []
+    if isinstance(container, list):
+        for idx, entry in enumerate(container):
+            if isinstance(entry, dict):
+                label = str(entry.get("name") or entry.get("id") or entry.get("pfe") or f"{default_prefix} {entry.get('index', idx)}").strip()
+                if entry.get("up") is False or entry.get("online") is False:
+                    st = str(entry.get("status") or entry.get("state") or "offline").strip()
+                    faults.append((label, st or "offline"))
+                    continue
+                for sk in ("status", "state", "pfe_status", "pfe_state"):
+                    st_val = entry.get(sk)
+                    if _is_down_member_state(st_val):
+                        faults.append((label, str(st_val).strip()))
+                        break
+            elif _is_down_member_state(entry):
+                faults.append((f"{default_prefix} {idx}", str(entry).strip()))
+    elif isinstance(container, dict):
+        if container.get("up") is False or container.get("online") is False:
+            st = str(container.get("status") or container.get("state") or "offline").strip()
+            faults.append((default_prefix, st or "offline"))
+        else:
+            direct_bad = False
+            for sk in ("status", "state", "pfe_status", "pfe_state"):
+                st_val = container.get(sk)
+                if _is_down_member_state(st_val):
+                    faults.append((str(container.get("name") or default_prefix), str(st_val).strip()))
+                    direct_bad = True
+                    break
+            if not direct_bad:
+                for k, v in container.items():
+                    if isinstance(v, (dict, list)):
+                        faults.extend(_extract_pfe_faults_from_obj(v, default_prefix=str(k)))
+                    elif _is_down_member_state(v):
+                        faults.append((str(k), str(v).strip()))
+    elif _is_down_member_state(container):
+        faults.append((default_prefix, str(container).strip()))
+    return faults
+
+
+def extract_vc_member_issues(sw: Dict[str, Any], site_name: str) -> List[Dict[str, Any]]:
+    """Detect down VC members, offline linecards, missing provisioned FPCs, and down PFEs on a connected switch/VC."""
+    if not isinstance(sw, dict):
+        return []
+    if str(sw.get("status") or "").lower() != "connected":
+        return []
+
+    module_stat = sw.get("module_stat") if isinstance(sw.get("module_stat"), list) else []
+    vc_setup = sw.get("vc_setup_info") if isinstance(sw.get("vc_setup_info"), dict) else {}
+    vc_members = sw.get("vc_members") if isinstance(sw.get("vc_members"), list) else []
+    vc_mac_raw = str(sw.get("vc_mac") or "").strip()
+
+    is_vc = bool(
+        len(module_stat) > 1
+        or vc_mac_raw
+        or bool(vc_setup)
+        or len(vc_members) > 1
+        or any(isinstance(m, dict) and str(m.get("vc_role") or "").strip() for m in module_stat)
+        or sw.get("is_vc") is True
+    )
+
+    ip_stat = sw.get("ip_stat") if isinstance(sw.get("ip_stat"), dict) else {}
+    sw_ip = str(sw.get("ip") or ip_stat.get("ip") or "").strip()
+    sw_mac = format_mac(sw.get("mac")) if sw.get("mac") else ""
+    vc_mac = format_mac(vc_mac_raw) if vc_mac_raw else ""
+    sw_name = str(sw.get("name") or sw_mac or "Unnamed Switch")
+    sw_model = str(sw.get("model") or "")
+    sw_last_seen = sw.get("last_seen")
+
+    issues: List[Dict[str, Any]] = []
+    present_fpcs = set()
+    flagged_fpcs = set()
+
+    def add_issue(
+        member_label: str,
+        issue_type: str,
+        state: str,
+        details: str,
+        fpc_idx: Optional[int] = None,
+        member_model: str = "",
+        member_serial: str = "",
+        source: str = "Switch Telemetry",
+    ) -> None:
+        issues.append(
+            {
+                "switch_name": sw_name,
+                "site_id": str(sw.get("site_id") or ""),
+                "site_name": site_name,
+                "model": member_model or sw_model,
+                "mac": vc_mac or sw_mac,
+                "ip": sw_ip,
+                "is_vc": is_vc,
+                "member_count": max(len(module_stat), len(vc_members), 1),
+                "fpc_idx": fpc_idx,
+                "member_label": member_label,
+                "serial": member_serial,
+                "issue_type": issue_type,
+                "state": state,
+                "details": details,
+                "source": source,
+                "timestamp": sw_last_seen or int(time.time()),
+            }
+        )
+
+    # 1. Inspect every FPC member in module_stat
+    for idx, mod in enumerate(module_stat):
+        if not isinstance(mod, dict):
+            continue
+        fpc_raw = mod.get("fpc_idx")
+        fpc_idx = int(fpc_raw) if isinstance(fpc_raw, (int, float)) else idx
+        vc_role = str(mod.get("vc_role") or "").strip().lower()
+        vc_state = str(mod.get("vc_state") or "").strip()
+        mod_status = str(mod.get("status") or mod.get("state") or mod.get("fpc_state") or "").strip()
+        member_label = f"FPC {fpc_idx} ({vc_role})" if vc_role else f"FPC {fpc_idx}"
+        m_model = str(mod.get("model") or sw_model)
+        m_serial = str(mod.get("serial") or "")
+
+        member_down = False
+        if _is_down_member_state(vc_state):
+            member_down = True
+            flagged_fpcs.add(fpc_idx)
+            itype = "Linecard Offline" if vc_role == "linecard" else "VC Member Down"
+            add_issue(
+                member_label=member_label,
+                issue_type=itype,
+                state=vc_state,
+                details=f"vc_state={vc_state}" + (f" · serial {m_serial}" if m_serial else ""),
+                fpc_idx=fpc_idx,
+                member_model=m_model,
+                member_serial=m_serial,
+            )
+        elif _is_down_member_state(mod_status):
+            member_down = True
+            flagged_fpcs.add(fpc_idx)
+            itype = "Linecard Offline" if vc_role == "linecard" else "VC Member Down"
+            add_issue(
+                member_label=member_label,
+                issue_type=itype,
+                state=mod_status,
+                details=f"module status={mod_status}" + (f" · serial {m_serial}" if m_serial else ""),
+                fpc_idx=fpc_idx,
+                member_model=m_model,
+                member_serial=m_serial,
+            )
+        else:
+            present_fpcs.add(fpc_idx)
+
+        # 2. Inspect PFEs on this member (even when vc_state is still "present"!)
+        for pk in ("pfes", "pfe_stat", "pfe_status", "pfe", "fpc_pfe", "asic_stat"):
+            if pk in mod and mod.get(pk) is not None:
+                for pfe_lbl, pfe_st in _extract_pfe_faults_from_obj(mod.get(pk), default_prefix="PFE"):
+                    add_issue(
+                        member_label=f"{member_label} · {pfe_lbl}",
+                        issue_type="PFE Down",
+                        state=pfe_st,
+                        details=f"PFE {pfe_st} on {member_label} (vc_state={vc_state or 'present'})",
+                        fpc_idx=fpc_idx,
+                        member_model=m_model,
+                        member_serial=m_serial,
+                    )
+
+        # 3. Inspect PICs on this member (ignore normal empty uplink slots that are merely 'absent'/'empty')
+        if not member_down and isinstance(mod.get("pics"), list):
+            for p_idx, pic in enumerate(mod["pics"]):
+                if not isinstance(pic, dict):
+                    continue
+                p_st = str(pic.get("status") or pic.get("state") or "").strip().lower()
+                if p_st in ("offline", "down", "dead", "fault", "failed", "error", "inactive", "wedged"):
+                    pic_num = pic.get("index", p_idx)
+                    pic_model = str(pic.get("model_number") or pic.get("model") or "").strip()
+                    add_issue(
+                        member_label=f"{member_label} · PIC {pic_num}",
+                        issue_type="PFE / PIC Down",
+                        state=p_st,
+                        details=f"PIC {pic_num} {p_st}" + (f" ({pic_model})" if pic_model else ""),
+                        fpc_idx=fpc_idx,
+                        member_model=m_model,
+                        member_serial=m_serial,
+                    )
+
+    # 4. Top-level PFE telemetry (some Juniper switch models expose pfe_stat at switch root)
+    for pk in ("pfes", "pfe_stat", "pfe_status"):
+        if pk in sw and sw.get(pk) is not None:
+            for pfe_lbl, pfe_st in _extract_pfe_faults_from_obj(sw.get(pk), default_prefix="PFE"):
+                add_issue(
+                    member_label=pfe_lbl,
+                    issue_type="PFE Down",
+                    state=pfe_st,
+                    details=f"Switch PFE reports {pfe_st}",
+                )
+
+    # 5. Preprovisioned VC missing members via vc_setup_info / vc_members
+    if vc_setup:
+        missing_fpc = vc_setup.get("err_missing_dev_id_fpc")
+        if missing_fpc:
+            if isinstance(missing_fpc, list):
+                for mf in missing_fpc:
+                    try:
+                        mf_idx = int(mf)
+                    except (TypeError, ValueError):
+                        mf_idx = None
+                    if mf_idx is not None and mf_idx in flagged_fpcs:
+                        continue
+                    add_issue(
+                        member_label=f"FPC {mf}" if mf_idx is not None else str(mf),
+                        issue_type="Missing VC Member",
+                        state="missing",
+                        details="Preprovisioned FPC member missing from active Virtual Chassis",
+                        fpc_idx=mf_idx,
+                    )
+            else:
+                add_issue(
+                    member_label="Provisioned FPC",
+                    issue_type="Missing VC Member",
+                    state="missing",
+                    details="vc_setup_info reports missing preprovisioned FPC member",
+                )
+
+        setup_members = vc_setup.get("members") if isinstance(vc_setup.get("members"), list) else []
+        for sm in setup_members:
+            if not isinstance(sm, dict):
+                continue
+            f_raw = sm.get("fpc_idx") if sm.get("fpc_idx") is not None else sm.get("member_id")
+            f_idx = int(f_raw) if isinstance(f_raw, (int, float)) else None
+            sm_state = str(sm.get("vc_state") or sm.get("state") or sm.get("status") or "").strip()
+            sm_role = str(sm.get("vc_role") or sm.get("role") or "").strip().lower()
+            if f_idx is not None and f_idx in flagged_fpcs:
+                continue
+            if _is_down_member_state(sm_state) or (f_idx is not None and present_fpcs and f_idx not in present_fpcs):
+                lbl = f"FPC {f_idx} ({sm_role})" if (f_idx is not None and sm_role) else (f"FPC {f_idx}" if f_idx is not None else "VC Member")
+                add_issue(
+                    member_label=lbl,
+                    issue_type="Linecard Offline" if sm_role == "linecard" else "VC Member Down",
+                    state=sm_state or "notpresent",
+                    details=f"Configured VC member offline/missing ({sm_state or 'not present in module_stat'})",
+                    fpc_idx=f_idx,
+                    member_serial=str(sm.get("serial") or ""),
+                )
+
+    for vm in vc_members:
+        if not isinstance(vm, dict):
+            continue
+        f_raw = vm.get("fpc_idx") if vm.get("fpc_idx") is not None else vm.get("member_id")
+        f_idx = int(f_raw) if isinstance(f_raw, (int, float)) else None
+        if f_idx is not None and f_idx in flagged_fpcs:
+            continue
+        vm_state = str(vm.get("vc_state") or vm.get("state") or vm.get("status") or "").strip()
+        vm_role = str(vm.get("vc_role") or vm.get("role") or "").strip().lower()
+        if _is_down_member_state(vm_state):
+            lbl = f"FPC {f_idx} ({vm_role})" if (f_idx is not None and vm_role) else (f"FPC {f_idx}" if f_idx is not None else "VC Member")
+            add_issue(
+                member_label=lbl,
+                issue_type="Linecard Offline" if vm_role == "linecard" else "VC Member Down",
+                state=vm_state,
+                details=f"vc_members state={vm_state}",
+                fpc_idx=f_idx,
+                member_serial=str(vm.get("serial") or ""),
+            )
+
+    return issues
+
+
+def extract_vc_alarm_issues(
+    raw_alarms: List[Dict[str, Any]],
+    site_map: Dict[str, Dict[str, Any]],
+    switch_info_map: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Surface active/unacknowledged Mist org alarms indicating down VC members, offline linecards, or down PFEs."""
+    results: List[Dict[str, Any]] = []
+    vc_keywords = ("pfe", "fpc", "linecard", "line card", "vc_member", "vc member", "virtual chassis", "vcp")
+    fault_keywords = ("down", "offline", "not present", "notpresent", "dead", "fail", "fault", "wedge", "missing", "inactive", "disconnect", "panic", "unreachable")
+    recovery_phrases = ("came up", "is up", "back online", "restored", "recovered", "reconnected")
+
+    for a in raw_alarms or []:
+        if not isinstance(a, dict):
+            continue
+        if a.get("acked") is True or a.get("resolved") is True:
+            continue
+        a_type = str(a.get("type") or "").strip()
+        a_text = str(a.get("text") or "").strip()
+        combined = f"{a_type} {a_text}".lower()
+        if not any(k in combined for k in vc_keywords):
+            continue
+        if not any(k in combined for k in fault_keywords):
+            continue
+        if any(rp in combined for rp in recovery_phrases):
+            continue
+
+        sid = str(a.get("site_id") or "")
+        site_name = a.get("site_name") or site_map.get(sid, {}).get("name", "Org")
+
+        hostnames = a.get("hostnames") if isinstance(a.get("hostnames"), list) else []
+        sw_list = a.get("switches") if isinstance(a.get("switches"), list) else []
+        mac_raw = a.get("mac") or a.get("device_mac") or (sw_list[0] if sw_list else "")
+        smac = normalize_mac(mac_raw)
+        sw_info = switch_info_map.get(smac, {}) if smac else {}
+        sw_name = (
+            (str(hostnames[0]).strip() if hostnames else "")
+            or str(a.get("device_name") or a.get("switch_name") or "").strip()
+            or sw_info.get("name")
+            or (format_mac(smac) if smac else "Virtual Chassis")
+        )
+        tokens = _FPC_PFE_TOKEN_RE.findall(a_text or a_type)
+        member_label = " · ".join(dict.fromkeys(t.upper() for t in tokens)) if tokens else "VC Member / PFE"
+        is_pfe = "pfe" in combined
+        issue_type = "PFE Down" if is_pfe else ("Linecard Offline" if "linecard" in combined or "line card" in combined else "VC Member Down")
+        results.append(
+            {
+                "switch_name": sw_name,
+                "site_id": sid,
+                "site_name": site_name,
+                "model": sw_info.get("model", ""),
+                "mac": format_mac(smac) if smac else "",
+                "ip": sw_info.get("ip", ""),
+                "is_vc": True,
+                "member_count": 0,
+                "fpc_idx": None,
+                "member_label": member_label,
+                "serial": "",
+                "issue_type": issue_type,
+                "state": str(a.get("severity") or "alarm").lower(),
+                "details": a_text or a_type.replace("_", " "),
+                "source": "Mist Alarm",
+                "timestamp": a.get("last_seen") or a.get("timestamp") or int(time.time()),
+            }
+        )
+    return results
+
+
+def _merge_vc_member_issues(
+    telemetry_issues: List[Dict[str, Any]],
+    alarm_issues: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Deduplicate switch telemetry VC/PFE issues with Mist org alarm issues."""
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for item in list(telemetry_issues) + list(alarm_issues):
+        raw_lbl = str(item.get("member_label") or "").strip().lower()
+        norm_lbl = re.sub(r"\s*\([^)]*\)", "", raw_lbl)
+        norm_lbl = re.sub(r"\s+", " ", norm_lbl).strip()
+        key = (
+            str(item.get("switch_name") or "").strip().lower(),
+            norm_lbl,
+            str(item.get("issue_type") or "").strip().lower(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    merged.sort(key=lambda x: (0 if "PFE" in str(x.get("issue_type")) else 1, str(x.get("site_name") or "").lower(), str(x.get("switch_name") or "").lower(), str(x.get("member_label") or "")))
+    return merged
 
 
 def _record_mist_api_call() -> None:
@@ -974,14 +1347,15 @@ def _scan_vc_temps_from_sites(
     session: requests.Session,
     active_switch_sites: List[Dict[str, Any]],
     rate_limit_flag: threading.Event,
-) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Per-site switch/VC thermal scan used on-demand when org-wide switch stats omit module_stat/temperatures."""
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+    """Per-site switch/VC thermal & member/PFE health scan when org-wide switch stats omit module_stat."""
     items: List[Dict[str, Any]] = []
+    member_issues: List[Dict[str, Any]] = []
     warnings: List[str] = []
 
-    def fetch_one(site: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    def fetch_one(site: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Optional[str]]:
         if rate_limit_flag.is_set():
-            return [], None
+            return [], [], None
         site_id = site.get("id", "")
         site_name = site.get("name", site_id)
         try:
@@ -997,31 +1371,34 @@ def _scan_vc_temps_from_sites(
             rate_limit_flag.set()
             raise
         except Exception as exc:
-            return [], f"Switch thermal scan failed for {site_name}: {exc}"
+            return [], [], f"Switch thermal scan failed for {site_name}: {exc}"
 
         found: List[Dict[str, Any]] = []
+        found_issues: List[Dict[str, Any]] = []
         for sw in switches:
             info = extract_switch_thermal_info(sw, site_name)
             if info is not None:
                 found.append(info)
-        return found, None
+            found_issues.extend(extract_vc_member_issues(sw, site_name))
+        return found, found_issues, None
 
     if not active_switch_sites:
-        return items, warnings
+        return items, member_issues, warnings
 
     with ThreadPoolExecutor(max_workers=min(6, len(active_switch_sites))) as pool:
         futures = [pool.submit(fetch_one, site) for site in active_switch_sites]
         for fut in as_completed(futures):
-            found, warn = fut.result()
+            found, found_issues, warn = fut.result()
             items.extend(found)
+            member_issues.extend(found_issues)
             if warn:
                 warnings.append(warn)
 
-    return items, warnings
+    return items, member_issues, warnings
 
 
 def collect_mist_snapshot() -> Dict[str, Any]:
-    global _last_snapshot_call_count, _switch_info_map_cache, _slow_aps_cache, _active_ap_sites_cache, _vc_temps_cache, _active_switch_sites_cache
+    global _last_snapshot_call_count, _switch_info_map_cache, _slow_aps_cache, _active_ap_sites_cache, _vc_temps_cache, _vc_member_issues_cache, _active_switch_sites_cache
     if not MIST_ORG_ID or not MIST_API_TOKEN:
         raise ValueError("MIST_ORG_ID and MIST_API_TOKEN must be configured in environment variables.")
 
@@ -1099,6 +1476,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         switch_info_map: Dict[str, Dict[str, Any]] = {}
         active_switch_site_ids = set()
         org_switch_thermals: List[Dict[str, Any]] = []
+        org_vc_member_issues: List[Dict[str, Any]] = []
+        org_switches_had_module_stat = False
         try:
             raw_switches = mist_get_paginated(
                 session,
@@ -1126,9 +1505,12 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                     switches_online += 1
                     if sid in site_map:
                         active_switch_site_ids.add(sid)
+                    if isinstance(sw.get("module_stat"), list) and sw.get("module_stat"):
+                        org_switches_had_module_stat = True
                     t_info = extract_switch_thermal_info(sw, site_name)
                     if t_info is not None:
                         org_switch_thermals.append(t_info)
+                    org_vc_member_issues.extend(extract_vc_member_issues(sw, site_name))
                     continue
                 switches_offline += 1
                 offline_switches.append(
@@ -1151,20 +1533,24 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 _active_switch_sites_cache = (time.time(), list(active_switch_sites))
                 if org_switch_thermals:
                     _vc_temps_cache = (time.time(), list(org_switch_thermals), "org_stats")
+                if org_switches_had_module_stat or org_vc_member_issues:
+                    _vc_member_issues_cache = (time.time(), list(org_vc_member_issues), "org_stats")
         except MistRateLimitError:
             raise
         except Exception as exc:
             warnings.append(f"Switch stats unavailable: {exc}")
 
         alarms: List[Dict[str, Any]] = []
+        alarm_vc_issues: List[Dict[str, Any]] = []
         try:
             alarms_resp = mist_get(
                 session,
                 f"/api/v1/orgs/{MIST_ORG_ID}/alarms/search",
-                params={"duration": "1d", "limit": 15},
+                params={"duration": "1d", "limit": 50},
             )
             raw_alarms = alarms_resp.get("results", []) if isinstance(alarms_resp, dict) else []
-            for a in raw_alarms:
+            alarm_vc_issues = extract_vc_alarm_issues(raw_alarms, site_map, switch_info_map)
+            for a in raw_alarms[:25]:
                 sid = a.get("site_id", "")
                 alarms.append(
                     {
@@ -1366,6 +1752,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         with _quota_lock:
             _last_snapshot_call_count = session.call_count
 
+        merged_vc_member_issues = _merge_vc_member_issues(org_vc_member_issues, alarm_vc_issues)
+
         return {
             "org": {
                 "id": MIST_ORG_ID,
@@ -1391,6 +1779,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 "switches_offline": switches_offline,
                 "switches_total": switches_online + switches_offline,
                 "devices_down_total": len(devices_down),
+                "vc_member_issues_count": len(merged_vc_member_issues),
                 "slow_aps_count": len(slow_aps) if slow_aps_meta["scanned"] else None,
                 "slow_aps_scanned": slow_aps_meta["scanned"],
                 "avg_rssi": round(sum(rssi_values) / len(rssi_values), 1) if rssi_values else None,
@@ -1403,6 +1792,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             "offline_aps": offline_aps,
             "offline_switches": offline_switches,
             "devices_down": devices_down,
+            "vc_member_issues": merged_vc_member_issues,
+            "vc_alarm_issues": alarm_vc_issues,
             "slow_aps": slow_aps,
             "slow_aps_meta": slow_aps_meta,
             "vc_temps": [],
@@ -1803,8 +2194,29 @@ def health():
     )
 
 
+def _get_merged_vc_member_issues(
+    alarm_issues: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Merge cached telemetry VC member/PFE issues with active Mist alarm-based VC issues."""
+    with _meta_cache_lock:
+        ts_mem, items_mem, source_mem = _vc_member_issues_cache
+    if alarm_issues is None:
+        with _cache_lock:
+            alarm_issues = list((_cache_data or {}).get("vc_alarm_issues") or [])
+    merged = _merge_vc_member_issues(items_mem, alarm_issues)
+    meta = {
+        "scanned": source_mem != "not_scanned",
+        "source": source_mem,
+        "scanned_at": datetime.fromtimestamp(ts_mem, tz=timezone.utc).isoformat() if ts_mem > 0 else None,
+        "count": len(merged),
+        "telemetry_count": len(items_mem),
+        "alarm_count": len(alarm_issues),
+    }
+    return merged, meta
+
+
 def _attach_live_stats_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure cached/fresh /api/stats payloads reflect latest polling state, quota, slow AP scan, and VC thermal cache."""
+    """Ensure cached/fresh /api/stats payloads reflect latest polling state, quota, slow AP scan, VC thermal, and VC member/PFE caches."""
     with _meta_cache_lock:
         _, items_slow, source_slow = _slow_aps_cache
     slow_meta = _build_slow_aps_meta()
@@ -1821,6 +2233,12 @@ def _attach_live_stats_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     summary["vc_temps_scanned"] = vc_meta["scanned"]
     summary["vc_temp_alarms_count"] = vc_meta["alarmed_count"] if vc_meta["scanned"] else None
     summary["vc_max_temp_c"] = vc_meta["max_temp_c"]
+
+    vc_member_issues, vc_member_meta = _get_merged_vc_member_issues(payload.get("vc_alarm_issues") or [])
+    payload["vc_member_issues"] = vc_member_issues
+    payload["vc_member_issues_meta"] = vc_member_meta
+    summary["vc_member_issues_count"] = len(vc_member_issues)
+
     payload["summary"] = summary
 
     estimates = dict(payload.get("estimates") or {})
@@ -2099,7 +2517,7 @@ def api_slow_aps_scan():
 
 @app.post("/api/vc-temps/scan")
 def api_vc_temps_scan():
-    global _vc_temps_cache, _active_switch_sites_cache
+    global _vc_temps_cache, _vc_member_issues_cache, _active_switch_sites_cache
     if not _is_authenticated():
         return jsonify({"error": "Authentication required", "login_required": True}), 401
     if not MIST_ORG_ID or not MIST_API_TOKEN:
@@ -2119,10 +2537,13 @@ def api_vc_temps_scan():
             or (force_scan and age < MIN_REFRESH_INTERVAL)
         ):
             evaluated, meta = _build_vc_temps_view(items_vc, calls_used=0)
+            vc_member_issues, vc_member_meta = _get_merged_vc_member_issues()
             resp = jsonify(
                 {
                     "vc_temps": evaluated,
                     "vc_temps_meta": meta,
+                    "vc_member_issues": vc_member_issues,
+                    "vc_member_issues_meta": vc_member_meta,
                     "cached": True,
                     "calls_used": 0,
                     "warnings": [],
@@ -2136,6 +2557,7 @@ def api_vc_temps_scan():
         rate_limit_flag = threading.Event()
         warnings: List[str] = []
         thermals: List[Dict[str, Any]] = []
+        member_issues: List[Dict[str, Any]] = []
         source_label = "on_demand"
 
         try:
@@ -2152,6 +2574,7 @@ def api_vc_temps_scan():
                     dedup_keys=("mac", "id"),
                 )
                 active_ids = set()
+                had_org_module_stat = False
                 for sw in raw_switches:
                     if not isinstance(sw, dict):
                         continue
@@ -2159,31 +2582,40 @@ def api_vc_temps_scan():
                     if sid in site_map:
                         active_ids.add(sid)
                     sname = sw.get("site_name") or site_map.get(sid, {}).get("name", "Unassigned")
+                    if isinstance(sw.get("module_stat"), list) and sw.get("module_stat"):
+                        had_org_module_stat = True
                     info = extract_switch_thermal_info(sw, sname)
                     if info is not None:
                         thermals.append(info)
+                    member_issues.extend(extract_vc_member_issues(sw, sname))
                 active_sw_sites = [site_map[sid] for sid in active_ids if sid in site_map]
                 with _meta_cache_lock:
                     _active_switch_sites_cache = (time.time(), list(active_sw_sites))
-                if thermals:
+                if thermals or had_org_module_stat:
                     source_label = "org_stats"
                 elif active_sw_sites:
-                    thermals, warnings = _scan_vc_temps_from_sites(session, active_sw_sites, rate_limit_flag)
+                    thermals, member_issues, warnings = _scan_vc_temps_from_sites(
+                        session, active_sw_sites, rate_limit_flag
+                    )
             else:
-                thermals, warnings = _scan_vc_temps_from_sites(session, active_sw_sites, rate_limit_flag)
+                thermals, member_issues, warnings = _scan_vc_temps_from_sites(
+                    session, active_sw_sites, rate_limit_flag
+                )
         except MistRateLimitError as exc:
             return jsonify({"error": str(exc), "api_quota": get_mist_api_quota_snapshot()}), 429
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 502
             return jsonify({"error": f"Mist API returned HTTP {status}"}), 502
         except Exception as exc:
-            return jsonify({"error": f"Failed to scan Virtual Chassis temperatures: {exc}"}), 502
+            return jsonify({"error": f"Failed to scan Virtual Chassis telemetry: {exc}"}), 502
         finally:
             calls_used = session.call_count
             session.close()
 
+        scan_ts = time.time()
         with _meta_cache_lock:
-            _vc_temps_cache = (time.time(), list(thermals), source_label)
+            _vc_temps_cache = (scan_ts, list(thermals), source_label)
+            _vc_member_issues_cache = (scan_ts, list(member_issues), source_label)
             active_cnt = len(_active_switch_sites_cache[1]) or len(active_sw_sites)
 
         evaluated, meta = _build_vc_temps_view(
@@ -2191,11 +2623,14 @@ def api_vc_temps_scan():
             active_switch_sites_count=active_cnt,
             calls_used=calls_used,
         )
+        vc_member_issues, vc_member_meta = _get_merged_vc_member_issues()
 
     resp = jsonify(
         {
             "vc_temps": evaluated,
             "vc_temps_meta": meta,
+            "vc_member_issues": vc_member_issues,
+            "vc_member_issues_meta": vc_member_meta,
             "cached": False,
             "calls_used": calls_used,
             "warnings": warnings,

@@ -1337,7 +1337,9 @@
     body.wallboard-mode #exportHistoryBtn,
     body.wallboard-mode #exportTrafficBtn,
     body.wallboard-mode #exportNacRejectsBtn,
-    body.wallboard-mode #exportVcTempsBtn { display: none !important; }
+    body.wallboard-mode #exportVcTempsBtn,
+    body.wallboard-mode #exportVcMemberIssuesBtn,
+    body.wallboard-mode #scanVcMembersBtn { display: none !important; }
     body.wallboard-mode .title-block h1 { font-size: 1.9rem; }
     body.wallboard-mode .kpi-grid { grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 22px; }
     body.wallboard-mode .kpi-card { padding: 24px 28px; }
@@ -1357,12 +1359,22 @@
     body.wallboard-mode th,
     body.wallboard-mode td { padding: 12px 14px; }
     body.wallboard-mode .alarm-item { font-size: 0.98rem; padding: 14px 16px; }
+    body.wallboard-mode #tab-devices-down .kpi-grid,
     body.wallboard-mode #tab-history .kpi-grid,
     body.wallboard-mode #tab-traffic .kpi-grid,
     body.wallboard-mode #tab-nac-rejects .kpi-grid,
     body.wallboard-mode #tab-hottest-vcs .kpi-grid { grid-template-columns: repeat(4, 1fr); }
 
-    /* Hottest VCs Thermal Alarms & Controls */
+    /* Global Homescreen / Cross-Tab Alarm Banners */
+    .global-alarms-stack {
+      display: none;
+      flex-direction: column;
+      gap: 9px;
+      margin-bottom: 16px;
+    }
+
+    .global-alarms-stack.has-alarms { display: flex; }
+
     .thermal-alarm-banner {
       display: none;
       align-items: center;
@@ -1374,7 +1386,7 @@
       color: #fecaca;
       padding: 10px 15px;
       border-radius: 12px;
-      margin-bottom: 16px;
+      margin-bottom: 0;
       font-size: 0.84rem;
       box-shadow: 0 10px 28px -12px rgba(248, 113, 113, 0.4);
       animation: paneEnter 220ms var(--ease-out);
@@ -1382,11 +1394,27 @@
 
     .thermal-alarm-banner.visible { display: flex; }
 
+    .thermal-alarm-banner.vc-member-alarm {
+      background: linear-gradient(90deg, rgba(251, 146, 60, 0.18) 0%, rgba(248, 113, 113, 0.09) 100%);
+      border-color: rgba(251, 146, 60, 0.52);
+      color: #fed7aa;
+      box-shadow: 0 10px 28px -12px rgba(251, 146, 60, 0.36);
+    }
+
+    .thermal-alarm-banner.vc-member-alarm .alarm-pulse-dot {
+      background: #fb923c;
+    }
+
+    .thermal-alarm-banner.vc-member-alarm .alarm-pulse-dot::after {
+      border-color: #fb923c;
+    }
+
     .thermal-alarm-left {
       display: inline-flex;
       align-items: center;
       gap: 10px;
       flex-wrap: wrap;
+      min-width: 0;
     }
 
     .alarm-pulse-dot {
@@ -1405,6 +1433,12 @@
       border-radius: 50%;
       border: 1.5px solid var(--red);
       animation: pulseRing 1.6s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    }
+
+    .pill.pfe-fault {
+      background: rgba(251, 146, 60, 0.16);
+      color: #fdba74;
+      border-color: rgba(251, 146, 60, 0.42);
     }
 
     .threshold-control {
@@ -1687,12 +1721,30 @@
       <button type="button" class="btn-secondary" style="padding:5px 11px;font-size:0.78rem;" onclick="toggleAutoSync(false)">Resume Auto-Sync</button>
     </div>
 
-    <div id="globalThermalAlarmBanner" class="thermal-alarm-banner" role="alert">
-      <div class="thermal-alarm-left">
-        <span class="alarm-pulse-dot" aria-hidden="true"></span>
-        <span id="globalThermalAlarmText"><strong>HIGH TEMP ALARM:</strong> One or more Virtual Chassis are above threshold.</span>
+    <div id="globalAlarmsStack" class="global-alarms-stack" aria-live="polite">
+      <div id="globalThermalAlarmBanner" class="thermal-alarm-banner" role="alert">
+        <div class="thermal-alarm-left">
+          <span class="alarm-pulse-dot" aria-hidden="true"></span>
+          <span id="globalThermalAlarmText"><strong>HIGH TEMP ALARM:</strong> One or more Virtual Chassis are above threshold.</span>
+        </div>
+        <button type="button" class="btn-secondary" style="padding:5px 12px;font-size:0.78rem;border-color:rgba(248,113,113,0.45);color:#fecaca;" onclick="switchTab('tab-hottest-vcs')">Inspect Hottest VCs &rarr;</button>
       </div>
-      <button type="button" class="btn-secondary" style="padding:5px 12px;font-size:0.78rem;border-color:rgba(248,113,113,0.45);color:#fecaca;" onclick="switchTab('tab-hottest-vcs')">Inspect Hottest VCs &rarr;</button>
+
+      <div id="globalSwitchDownBanner" class="thermal-alarm-banner" role="alert">
+        <div class="thermal-alarm-left">
+          <span class="alarm-pulse-dot" aria-hidden="true"></span>
+          <span id="globalSwitchDownText"><strong>SWITCH DOWN ALARM:</strong> One or more switches are offline.</span>
+        </div>
+        <button type="button" class="btn-secondary" style="padding:5px 12px;font-size:0.78rem;border-color:rgba(248,113,113,0.45);color:#fecaca;" onclick="jumpToDownSwitches()">Inspect Down Switches &rarr;</button>
+      </div>
+
+      <div id="globalVcMemberBanner" class="thermal-alarm-banner vc-member-alarm" role="alert">
+        <div class="thermal-alarm-left">
+          <span class="alarm-pulse-dot" aria-hidden="true"></span>
+          <span id="globalVcMemberText"><strong>VC MEMBER / PFE ALARM:</strong> One or more VC linecards or PFEs are down.</span>
+        </div>
+        <button type="button" class="btn-secondary" style="padding:5px 12px;font-size:0.78rem;border-color:rgba(251,146,60,0.48);color:#fed7aa;" onclick="jumpToVcMemberIssues()">Inspect VC Members &rarr;</button>
+      </div>
     </div>
 
     <div id="wallboardBar" class="wallboard-bar">
@@ -1889,7 +1941,7 @@
           </div>
         </div>
 
-        <!-- TAB 2: DEVICES DOWN (APs & SWITCHES) -->
+        <!-- TAB 2: DEVICES DOWN (APs, SWITCHES & VC MEMBERS / PFEs) -->
         <div id="tab-devices-down" class="tab-pane">
           <section class="kpi-grid">
             <div class="kpi-card kpi-down-ok" id="kpiDownTotalCard">
@@ -1900,14 +1952,6 @@
               </div>
               <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barDownTotal" style="background:var(--green);"></span></div>
             </div>
-            <div class="kpi-card kpi-down-ok" id="kpiDownApsCard">
-              <div>
-                <div class="kpi-head"><div class="kpi-label">Access Points Down</div><span class="kpi-dot"></span></div>
-                <div class="kpi-value" id="kpiDownAps">--</div>
-                <div class="kpi-sub" id="kpiDownApsSub">-- / -- online</div>
-              </div>
-              <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barDownAps" style="background:var(--green);"></span></div>
-            </div>
             <div class="kpi-card kpi-down-ok" id="kpiDownSwitchesCard">
               <div>
                 <div class="kpi-head"><div class="kpi-label">Switches Down</div><span class="kpi-dot"></span></div>
@@ -1916,9 +1960,58 @@
               </div>
               <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barDownSwitches" style="background:var(--green);"></span></div>
             </div>
+            <div class="kpi-card kpi-down-ok" id="kpiDownVcMembersCard">
+              <div>
+                <div class="kpi-head"><div class="kpi-label">Down VC Members / PFEs</div><span class="kpi-dot"></span></div>
+                <div class="kpi-value" id="kpiDownVcMembers">--</div>
+                <div class="kpi-sub" id="kpiDownVcMembersSub">Offline linecards &amp; PFE faults</div>
+              </div>
+              <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barDownVcMembers" style="background:var(--green);"></span></div>
+            </div>
+            <div class="kpi-card kpi-down-ok" id="kpiDownApsCard">
+              <div>
+                <div class="kpi-head"><div class="kpi-label">Access Points Down</div><span class="kpi-dot"></span></div>
+                <div class="kpi-value" id="kpiDownAps">--</div>
+                <div class="kpi-sub" id="kpiDownApsSub">-- / -- online</div>
+              </div>
+              <div class="kpi-bar-track"><span class="kpi-bar-fill" id="barDownAps" style="background:var(--green);"></span></div>
+            </div>
           </section>
 
-          <div class="panel">
+          <div id="vcMemberIssuesPanel" class="panel" style="margin-bottom:16px;">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title">Down VC Members, Offline Linecards &amp; PFE Faults</h2>
+                <span id="vcMemberIssuesBadge" class="pill ok">All Healthy</span>
+              </div>
+              <div class="panel-actions">
+                <input id="vcMemberIssuesFilter" class="search" type="search" placeholder="Filter VC, site, FPC, PFE, MAC..." oninput="renderVcMemberIssuesTable()" />
+                <button id="scanVcMembersBtn" class="btn-secondary" style="display:none;" onclick="scanVcTemps(true)">Scan Switch Modules</button>
+                <button id="exportVcMemberIssuesBtn" class="btn-secondary" onclick="exportVcMemberIssuesCsv()" disabled>Export CSV</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Fault Type</th>
+                    <th>Switch / VC &amp; IP / MAC</th>
+                    <th>Site</th>
+                    <th>Member / PFE</th>
+                    <th>State &amp; Details</th>
+                    <th>Source &amp; Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody id="vcMemberIssuesBody"></tbody>
+              </table>
+            </div>
+            <div class="hist-footer">
+              <span id="vcMemberIssuesMetaLeft">Monitors connected Virtual Chassis FPC/linecard states, PFE/PIC hardware status, missing preprovisioned members, and active Mist PFE/VC alarms.</span>
+              <span id="vcMemberIssuesMetaRight">--</span>
+            </div>
+          </div>
+
+          <div id="offlineDevicesPanel" class="panel">
             <div class="panel-header">
               <div class="panel-actions">
                 <h2 class="panel-title">Offline Access Points &amp; Switches</h2>
@@ -2970,11 +3063,7 @@
       if (activePane) {
         activePane.querySelectorAll(".table-wrap, .alarm-list").forEach(el => { el.scrollTop = 0; });
       }
-      const gThermal = document.getElementById("globalThermalAlarmBanner");
-      if (gThermal) {
-        const hasAlarm = (getScopedVcTemps().some(x => x.above_threshold));
-        gThermal.classList.toggle("visible", Boolean(latestData?.vc_temps_meta?.scanned && hasAlarm && tabId !== "tab-hottest-vcs"));
-      }
+      renderGlobalAlarmBanners();
       renderWallboardTabs();
       if (wbActive) updateWallboardProgress();
       if (tabId === "tab-home" && latestData) {
@@ -3248,6 +3337,243 @@
           <td>${escapeHtml(seen.label)}${seen.rel ? `<span class="sub-cell">${escapeHtml(seen.rel)}</span>` : ""}</td>
         </tr>`;
       }).join("");
+    }
+
+    /* Down VC Members, Offline Linecards & PFE Faults */
+    function getVcMemberIssues() {
+      return Array.isArray(latestData?.vc_member_issues) ? latestData.vc_member_issues : [];
+    }
+
+    function getFilteredVcMemberIssues() {
+      const q = (document.getElementById("vcMemberIssuesFilter")?.value || "").trim().toLowerCase();
+      return getVcMemberIssues().filter(it => {
+        if (!q) return true;
+        return (
+          (it.switch_name || "").toLowerCase().includes(q) ||
+          (it.site_name || "").toLowerCase().includes(q) ||
+          (it.member_label || "").toLowerCase().includes(q) ||
+          (it.issue_type || "").toLowerCase().includes(q) ||
+          (it.state || "").toLowerCase().includes(q) ||
+          (it.details || "").toLowerCase().includes(q) ||
+          (it.model || "").toLowerCase().includes(q) ||
+          (it.mac || "").toLowerCase().includes(q) ||
+          (it.ip || "").toLowerCase().includes(q) ||
+          (it.serial || "").toLowerCase().includes(q) ||
+          (it.source || "").toLowerCase().includes(q)
+        );
+      });
+    }
+
+    function exportVcMemberIssuesCsv() {
+      const rows = getFilteredVcMemberIssues();
+      if (!rows.length) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(
+        `mist-vc-member-pfe-faults-${dateStamp}.csv`,
+        ["Fault Type", "Switch / VC", "Site", "Member / PFE", "State", "Details", "Model", "Serial", "IP", "MAC", "Source", "Timestamp"],
+        rows.map(it => [
+          it.issue_type ?? "", it.switch_name ?? "", it.site_name ?? "", it.member_label ?? "",
+          it.state ?? "", it.details ?? "", it.model ?? "", it.serial ?? "",
+          it.ip ?? "", it.mac ?? "", it.source ?? "",
+          typeof it.timestamp === "number" && it.timestamp > 0 ? new Date(it.timestamp * 1000).toISOString() : ""
+        ])
+      );
+    }
+
+    function renderVcMemberIssuesTable() {
+      const tbody = document.getElementById("vcMemberIssuesBody");
+      const badge = document.getElementById("vcMemberIssuesBadge");
+      const exportBtn = document.getElementById("exportVcMemberIssuesBtn");
+      if (!tbody) return;
+      const allIssues = getVcMemberIssues();
+      const rows = getFilteredVcMemberIssues();
+
+      if (badge) {
+        badge.textContent = allIssues.length === 0
+          ? "All Healthy"
+          : `${fmtNum(allIssues.length)} Fault${allIssues.length === 1 ? "" : "s"}`;
+        badge.className = `pill ${allIssues.length === 0 ? "ok" : "bad"}`;
+      }
+      if (exportBtn) exportBtn.disabled = rows.length === 0;
+
+      if (!allIssues.length) {
+        const scanned = Boolean(latestData?.vc_member_issues_meta?.scanned);
+        tbody.innerHTML = scanned
+          ? '<tr><td colspan="6" class="empty" style="color:var(--green);">No down Virtual Chassis members, offline linecards, or PFE faults detected.</td></tr>'
+          : '<tr><td colspan="6" class="empty" style="color:var(--green);">No active VC member / PFE alarms detected. Click "Scan Switch Modules" above to also inspect per-site FPC &amp; PFE module telemetry.</td></tr>';
+        return;
+      }
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No matching VC member or PFE faults found.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = rows.map(it => {
+        const itype = it.issue_type || "VC Member Down";
+        const isPfe = /pfe|pic/i.test(itype);
+        const typePillCls = isPfe ? "pfe-fault" : "bad";
+        const metaChips = [];
+        if (it.ip) metaChips.push(renderCopyable(it.ip, "IP"));
+        if (it.mac) metaChips.push(renderCopyable(it.mac, "MAC"));
+        const modelParts = [it.model, it.serial ? `S/N ${it.serial}` : ""].filter(Boolean).join(" · ");
+        const seen = fmtLastSeen(it.timestamp);
+        const srcCls = /alarm/i.test(it.source || "") ? "warn" : "type-switch";
+        return `<tr class="thermal-alarm-row">
+          <td style="white-space:nowrap;"><span class="pill ${typePillCls}">${escapeHtml(itype)}</span></td>
+          <td><strong>${escapeHtml(it.switch_name || "Unknown Switch")}</strong>${metaChips.length ? `<span class="sub-cell">${metaChips.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}${modelParts ? `<span class="sub-cell">${escapeHtml(modelParts)}</span>` : ""}</td>
+          <td>${escapeHtml(it.site_name || "--")}</td>
+          <td style="white-space:nowrap;"><strong style="font-family:var(--font-mono);color:#fff;">${escapeHtml(it.member_label || "VC Member")}</strong></td>
+          <td style="white-space:normal;max-width:260px;"><span class="pill bad">${escapeHtml(it.state || "down")}</span>${it.details ? `<span class="sub-cell">${escapeHtml(it.details)}</span>` : ""}</td>
+          <td style="white-space:nowrap;"><span class="pill ${srcCls}">${escapeHtml(it.source || "Switch Telemetry")}</span>${seen.label && seen.label !== "--" ? `<span class="sub-cell">${escapeHtml(seen.rel || seen.label)}</span>` : ""}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderVcMemberIssuesSection() {
+      const issues = getVcMemberIssues();
+      const meta = latestData?.vc_member_issues_meta || {};
+      const count = issues.length;
+      const pfeCount = issues.filter(x => /pfe|pic/i.test(x.issue_type || "")).length;
+      const memberCount = count - pfeCount;
+
+      animateKpiValue("kpiDownVcMembers", count);
+      const subEl = document.getElementById("kpiDownVcMembersSub");
+      if (subEl) {
+        if (count === 0) {
+          subEl.textContent = meta.scanned ? "All VC linecards & PFEs healthy" : "0 active alarms · run module scan for full FPC check";
+        } else {
+          const parts = [];
+          if (pfeCount > 0) parts.push(`${fmtNum(pfeCount)} PFE/PIC`);
+          if (memberCount > 0) parts.push(`${fmtNum(memberCount)} linecard/FPC`);
+          subEl.textContent = `${parts.join(" · ")} fault${count === 1 ? "" : "s"} active`;
+        }
+      }
+      const card = document.getElementById("kpiDownVcMembersCard");
+      if (card) card.className = `kpi-card ${count > 0 ? "kpi-down-bad" : "kpi-down-ok"}`;
+      const bar = document.getElementById("barDownVcMembers");
+      if (bar) bar.style.background = count > 0 ? "#fb923c" : "var(--green)";
+      setBarWidth("barDownVcMembers", count > 0 ? Math.min(100, Math.max(20, count * 18)) : 100);
+
+      const scanBtn = document.getElementById("scanVcMembersBtn");
+      if (scanBtn) {
+        const estCalls = latestData?.vc_temps_meta?.estimated_calls || latestData?.estimates?.vc_temps_scan_calls || 1;
+        scanBtn.style.display = meta.scanned ? "none" : "inline-flex";
+        scanBtn.disabled = Boolean(vcTempState.scanning);
+        scanBtn.textContent = vcTempState.scanning
+          ? "Scanning Modules..."
+          : `Scan Switch Modules (~${fmtNum(estCalls)} call${estCalls === 1 ? "" : "s"})`;
+      }
+
+      const rightMeta = document.getElementById("vcMemberIssuesMetaRight");
+      if (rightMeta) {
+        if (meta.scanned) {
+          const when = meta.scanned_at ? new Date(meta.scanned_at).toLocaleTimeString() : "just now";
+          const srcTxt = meta.source === "org_stats" ? "org switch stats (0 extra calls)" : "per-site switch module scan";
+          rightMeta.textContent = `Checked ${when} · ${srcTxt} + active Mist alarms`;
+        } else {
+          rightMeta.textContent = "Monitoring active Mist org alarms · per-site module_stat not yet scanned";
+        }
+      }
+
+      renderVcMemberIssuesTable();
+    }
+
+    function updateDevicesDownNavBadge() {
+      const navDownBadge = document.getElementById("navDevicesDownCount");
+      if (!navDownBadge || !latestData) return;
+      const downAps = (latestData.offline_aps || []).length;
+      const downSwitches = (latestData.offline_switches || []).length;
+      const vcIssues = getVcMemberIssues().length;
+      const combined = downAps + downSwitches + vcIssues;
+      navDownBadge.textContent = fmtNum(combined);
+      navDownBadge.className = `pill ${combined > 0 ? "bad" : "ok"}`;
+      const tipParts = [];
+      if (downSwitches > 0) tipParts.push(`${downSwitches} switch${downSwitches === 1 ? "" : "es"} down`);
+      if (vcIssues > 0) tipParts.push(`${vcIssues} VC member/PFE fault${vcIssues === 1 ? "" : "s"}`);
+      if (downAps > 0) tipParts.push(`${downAps} AP${downAps === 1 ? "" : "s"} down`);
+      navDownBadge.title = tipParts.length ? tipParts.join(" · ") : "All APs, switches, and VC members online";
+    }
+
+    function renderGlobalAlarmBanners() {
+      const stack = document.getElementById("globalAlarmsStack");
+      const gThermal = document.getElementById("globalThermalAlarmBanner");
+      const gThermalTxt = document.getElementById("globalThermalAlarmText");
+      const gSwitch = document.getElementById("globalSwitchDownBanner");
+      const gSwitchTxt = document.getElementById("globalSwitchDownText");
+      const gVcMem = document.getElementById("globalVcMemberBanner");
+      const gVcMemTxt = document.getElementById("globalVcMemberText");
+
+      let anyVisible = false;
+
+      // 1. #1 Hottest VC High-Temp Alarm Banner (hidden on Hottest VCs tab)
+      const vcMeta = latestData?.vc_temps_meta || {};
+      const thresholdC = typeof vcMeta.threshold_c === "number" ? vcMeta.threshold_c : 60;
+      const scopedVcs = getScopedVcTemps();
+      const alarmedVcs = scopedVcs.filter(x => x.above_threshold);
+      const showThermal = Boolean(vcMeta.scanned && alarmedVcs.length > 0 && activeTabId !== "tab-hottest-vcs");
+      if (gThermal) {
+        if (showThermal && gThermalTxt) {
+          const hottest = alarmedVcs[0];
+          const unitLbl = vcTempState.scope === "all" ? "switch" : "VC";
+          const rest = alarmedVcs.slice(1, 3).map(x => `${x.name} (${x.peak_temp_c}°C)`).join(", ");
+          const extra = alarmedVcs.length > 3 ? ` +${alarmedVcs.length - 3} more` : "";
+          const alsoTxt = rest ? ` · Also hot: ${rest}${extra}` : "";
+          const countTxt = alarmedVcs.length > 1
+            ? `${fmtNum(alarmedVcs.length)} ${unitLbl}s above ${thresholdC}°C · `
+            : `above ${thresholdC}°C · `;
+          gThermalTxt.innerHTML = `<strong>HIGH TEMP ALARM:</strong> ${escapeHtml(countTxt)}#1 <span style="font-family:var(--font-mono);color:#fff;font-weight:700;">${escapeHtml(hottest.name)} (${escapeHtml(hottest.peak_temp_c)}°C)</span> <span style="opacity:0.9;">(${escapeHtml(hottest.site_name)})${escapeHtml(alsoTxt)}</span>`;
+        }
+        gThermal.classList.toggle("visible", showThermal);
+        if (showThermal) anyVisible = true;
+      }
+
+      // 2. Down Switches Alarm Banner (hidden on Devices Down tab)
+      const downSwitches = latestData?.offline_switches || [];
+      const showSwitchDown = Boolean(downSwitches.length > 0 && activeTabId !== "tab-devices-down");
+      if (gSwitch) {
+        if (showSwitchDown && gSwitchTxt) {
+          const preview = downSwitches.slice(0, 3).map(sw => `${sw.name} (${sw.site_name})`).join(", ");
+          const extra = downSwitches.length > 3 ? ` +${downSwitches.length - 3} more` : "";
+          gSwitchTxt.innerHTML = `<strong>SWITCH DOWN ALARM:</strong> ${fmtNum(downSwitches.length)} switch${downSwitches.length === 1 ? "" : "es"} offline — <span style="font-family:var(--font-mono);color:#fff;font-weight:600;">${escapeHtml(preview + extra)}</span>`;
+        }
+        gSwitch.classList.toggle("visible", showSwitchDown);
+        if (showSwitchDown) anyVisible = true;
+      }
+
+      // 3. Down VC Members / Offline Linecards / Down PFEs Alarm Banner (hidden on Devices Down tab)
+      const vcIssues = getVcMemberIssues();
+      const showVcMem = Boolean(vcIssues.length > 0 && activeTabId !== "tab-devices-down");
+      if (gVcMem) {
+        if (showVcMem && gVcMemTxt) {
+          const preview = vcIssues.slice(0, 2).map(it => {
+            const shortLbl = String(it.member_label || "VC Member").replace(/\s*\([^)]*\)/g, "");
+            return `${it.switch_name} (${shortLbl}: ${it.state || it.issue_type})`;
+          }).join(", ");
+          const extra = vcIssues.length > 2 ? ` +${vcIssues.length - 2} more` : "";
+          gVcMemTxt.innerHTML = `<strong>VC MEMBER / PFE ALARM:</strong> ${fmtNum(vcIssues.length)} down VC member${vcIssues.length === 1 ? "" : "s"} / PFE${vcIssues.length === 1 ? "" : "s"} — <span style="font-family:var(--font-mono);color:#fff;font-weight:600;">${escapeHtml(preview + extra)}</span>`;
+        }
+        gVcMem.classList.toggle("visible", showVcMem);
+        if (showVcMem) anyVisible = true;
+      }
+
+      if (stack) stack.classList.toggle("has-alarms", anyVisible);
+    }
+
+    function jumpToDownSwitches() {
+      setDeviceDownFilter("Switch");
+      switchTab("tab-devices-down");
+      setTimeout(() => {
+        const panel = document.getElementById("offlineDevicesPanel");
+        if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 45);
+    }
+
+    function jumpToVcMemberIssues() {
+      switchTab("tab-devices-down");
+      setTimeout(() => {
+        const panel = document.getElementById("vcMemberIssuesPanel");
+        if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 45);
     }
 
     function renderSitesTable() {
@@ -3611,22 +3937,13 @@
       const scopedAll = getScopedVcTemps();
       const alarmedAll = scopedAll.filter(x => x.above_threshold);
       const navBadge = document.getElementById("navHotVcsCount");
-      const globalBanner = document.getElementById("globalThermalAlarmBanner");
-      const globalText = document.getElementById("globalThermalAlarmText");
 
       if (!scanned) {
         if (navBadge) { navBadge.textContent = "Scan"; navBadge.className = "pill neutral"; }
-        if (globalBanner) globalBanner.classList.remove("visible");
       } else if (alarmedAll.length > 0) {
         if (navBadge) {
           navBadge.textContent = `${fmtNum(alarmedAll.length)} Alarm`;
           navBadge.className = "pill bad";
-        }
-        if (globalBanner && globalText) {
-          const preview = alarmedAll.slice(0, 3).map(x => `${x.name} (${x.peak_temp_c}°C)`).join(", ");
-          const extra = alarmedAll.length > 3 ? ` +${alarmedAll.length - 3} more` : "";
-          globalText.innerHTML = `<strong>HIGH TEMP ALARM:</strong> ${fmtNum(alarmedAll.length)} ${vcTempState.scope === "all" ? "switch" : "VC"}${alarmedAll.length === 1 ? "" : "s"} above ${escapeHtml(thresholdC)}°C — <span style="font-family:var(--font-mono);color:#fff;">${escapeHtml(preview + extra)}</span>`;
-          globalBanner.classList.toggle("visible", activeTabId !== "tab-hottest-vcs");
         }
       } else {
         const peakNum = scopedAll.length ? scopedAll[0].peak_temp_c : null;
@@ -3634,8 +3951,8 @@
           navBadge.textContent = typeof peakNum === "number" ? `${peakNum}°C` : "0";
           navBadge.className = `pill ${typeof peakNum === "number" && peakNum >= warnC ? "warn" : "ok"}`;
         }
-        if (globalBanner) globalBanner.classList.remove("visible");
       }
+      renderGlobalAlarmBanners();
 
       const gate = document.getElementById("vcTempsOnDemandGate");
       const skel = document.getElementById("vcTempsSkeleton");
@@ -3872,9 +4189,11 @@
       vcTempState.scanning = true;
       const b1 = document.getElementById("scanVcTempsBtn");
       const b2 = document.getElementById("vcTempsGateScanBtn");
+      const b3 = document.getElementById("scanVcMembersBtn");
       const badge = document.getElementById("vcTempsBadge");
       if (b1) b1.disabled = true;
       if (b2) b2.disabled = true;
+      if (b3) { b3.disabled = true; b3.textContent = "Scanning Modules..."; }
       if (badge) { badge.textContent = "Scanning..."; badge.className = "pill type-ap"; }
       renderVcTempsSection();
 
@@ -3892,25 +4211,37 @@
         if (!latestData) latestData = {};
         latestData.vc_temps = data.vc_temps || [];
         latestData.vc_temps_meta = data.vc_temps_meta || { scanned: true, source: "on_demand" };
+        if (Array.isArray(data.vc_member_issues)) {
+          latestData.vc_member_issues = data.vc_member_issues;
+        }
+        if (data.vc_member_issues_meta) {
+          latestData.vc_member_issues_meta = data.vc_member_issues_meta;
+        }
 
         const alarmCnt = latestData.vc_temps_meta.alarmed_count || 0;
+        const vcMemCnt = getVcMemberIssues().length;
         const callsNote = data.cached ? "served from cache" : fmtCalls(data.calls_used || 0);
-        showToast(
-          alarmCnt > 0 ? `VC Thermal Alarm: ${alarmCnt} above threshold` : "VC thermal scan complete",
-          callsNote,
-          alarmCnt > 0 ? "warn" : "ok"
-        );
+        const toastTitle = alarmCnt > 0 && vcMemCnt > 0
+          ? `${alarmCnt} thermal alarm${alarmCnt === 1 ? "" : "s"} · ${vcMemCnt} VC member/PFE fault${vcMemCnt === 1 ? "" : "s"}`
+          : (alarmCnt > 0
+            ? `VC Thermal Alarm: ${alarmCnt} above threshold`
+            : (vcMemCnt > 0 ? `VC Member / PFE Alarm: ${vcMemCnt} fault${vcMemCnt === 1 ? "" : "s"} detected` : "VC switch telemetry scan complete"));
+        showToast(toastTitle, callsNote, (alarmCnt > 0 || vcMemCnt > 0) ? "warn" : "ok");
       } catch (err) {
         const banner = document.getElementById("errorBanner");
         if (banner) {
-          banner.textContent = "VC thermal scan failed: " + err.message;
+          banner.textContent = "VC switch scan failed: " + err.message;
           banner.style.display = "block";
         }
       } finally {
         vcTempState.scanning = false;
         if (b1) b1.disabled = false;
         if (b2) b2.disabled = false;
+        if (b3) b3.disabled = false;
         renderVcTempsSection();
+        renderVcMemberIssuesSection();
+        updateDevicesDownNavBadge();
+        renderGlobalAlarmBanners();
       }
     }
 
@@ -4149,10 +4480,7 @@
 
       // Update Sidebar Badges
       document.getElementById("navUsersCount").textContent = fmtNum(sum.total_wireless_users);
-
-      const navDownBadge = document.getElementById("navDevicesDownCount");
-      navDownBadge.textContent = fmtNum(totalDown);
-      navDownBadge.className = `pill ${totalDown > 0 ? "bad" : "ok"}`;
+      updateDevicesDownNavBadge();
 
       document.getElementById("navSitesCount").textContent = fmtNum(sum.total_sites);
 
@@ -4181,9 +4509,11 @@
       }
 
       renderDevicesDownTable();
+      renderVcMemberIssuesSection();
       renderSitesTable();
       renderSlowApsSection();
       renderVcTempsSection();
+      renderGlobalAlarmBanners();
       if (activeTabId === "tab-home") renderCharts(data);
 
       const topAps = data.top_aps || [];

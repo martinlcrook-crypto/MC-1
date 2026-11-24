@@ -630,9 +630,11 @@ def _query_site_insights(
     start_ts: int,
     end_ts: int,
     interval_val: str = "3600",
+    allow_duration_fallback: bool = True,
 ) -> Tuple[Optional[List[Tuple[int, float, float, float]]], Optional[str]]:
     """Strictly read-only GET query to Mist site insights for one site."""
     base_params = {"start": str(start_ts), "end": str(end_ts)}
+    default_int = _parse_interval_sec(interval_val, 3600)
 
     if spec.mode == "site_stats":
         url = f"{api_host}/api/v1/sites/{site_id}/insights/site/{site_id}/stats"
@@ -641,17 +643,18 @@ def _query_site_insights(
         payload, err = _get_json_with_interval_fallback(session, url, q_params, interval_val)
         if payload is None:
             return None, err
-        points, ok = _extract_site_series(payload, spec, default_interval=3600)
+        points, ok = _extract_site_series(payload, spec, default_interval=default_int)
         if ok and sum(p[1] for p in points) > 0:
             return points, None
-        # Retry with duration=Nd & interval=1h in case Mist prefers relative duration
-        dur_days = max(1, int(round((end_ts - start_ts) / 86400.0)))
-        dur_params = {"duration": f"{dur_days}d", "interval": "1h", "metrics": spec.query_metrics}
-        payload2, _ = _get_json_with_interval_fallback(session, url, dur_params, "")
-        if payload2 is not None:
-            points2, ok2 = _extract_site_series(payload2, spec, default_interval=3600)
-            if ok2 and sum(p[1] for p in points2) > 0:
-                return points2, None
+        # Retry with duration=Nd & interval=1h only for rolling "latest N days" queries
+        if allow_duration_fallback:
+            dur_days = max(1, int(round((end_ts - start_ts) / 86400.0)))
+            dur_params = {"duration": f"{dur_days}d", "interval": "1h", "metrics": spec.query_metrics}
+            payload2, _ = _get_json_with_interval_fallback(session, url, dur_params, "")
+            if payload2 is not None:
+                points2, ok2 = _extract_site_series(payload2, spec, default_interval=3600)
+                if ok2 and sum(p[1] for p in points2) > 0:
+                    return points2, None
         if not ok:
             return None, f"unparsed ({_describe_payload_shape(payload)})"
         return points, None
@@ -666,8 +669,8 @@ def _query_site_insights(
         if tx_payload is None:
             return None, f"{spec.tx_key}: {tx_err}"
 
-        rx_pts, rx_ok = _extract_single_value_series(rx_payload, spec.rx_key, spec.kind, spec.unit_scale)
-        tx_pts, tx_ok = _extract_single_value_series(tx_payload, spec.tx_key, spec.kind, spec.unit_scale)
+        rx_pts, rx_ok = _extract_single_value_series(rx_payload, spec.rx_key, spec.kind, spec.unit_scale, default_interval=default_int)
+        tx_pts, tx_ok = _extract_single_value_series(tx_payload, spec.tx_key, spec.kind, spec.unit_scale, default_interval=default_int)
         if not (rx_ok and tx_ok):
             return None, f"unparsed ({_describe_payload_shape(rx_payload)})"
 
@@ -685,7 +688,7 @@ def _query_site_insights(
     if payload is None:
         return None, err
 
-    points, ok = _extract_site_series(payload, spec, default_interval=3600)
+    points, ok = _extract_site_series(payload, spec, default_interval=default_int)
     if not ok:
         return None, f"unparsed ({_describe_payload_shape(payload)})"
     return points, None
@@ -747,15 +750,45 @@ def _load_sites(
     return sites, ordered_ids
 
 
-def _format_hour_label(dt: datetime, days: int) -> str:
-    if days <= 1:
+def parse_local_datetime_to_epoch(raw: Optional[str]) -> Optional[int]:
+    """Parse an epoch timestamp or local ISO datetime (YYYY-MM-DDTHH:MM) in DISPLAY_TZ."""
+    s = str(raw or "").strip()
+    if not s:
+        return None
+    if s.isdigit():
+        val = int(s)
+        if val > 1e12:
+            val = val // 1000
+        return val if val > 0 else None
+    iso = s[:-1] + "+00:00" if s.endswith("Z") else s
+    if len(iso) == 10 and iso[4] == "-" and iso[7] == "-":
+        iso = f"{iso}T00:00:00"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError as exc:
+        raise ValueError(f"Invalid date/time format: '{s}'. Expected YYYY-MM-DDTHH:MM.") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=DISPLAY_TZ)
+    return int(dt.timestamp())
+
+
+def _format_bucket_label(dt: datetime, span_sec: int) -> str:
+    if span_sec <= 86400 + 3600:
         return dt.strftime("%H:%M")
-    return dt.strftime("%a %H:%M")
+    if span_sec <= 7 * 86400 + 3600:
+        return dt.strftime("%a %H:%M")
+    return dt.strftime("%d %b %H:%M")
 
 
-def _format_hour_full_label(dt: datetime) -> str:
-    end_hour = (dt.hour + 1) % 24
-    return f"{dt.strftime('%a %d %b %Y, %H:00')}–{end_hour:02d}:00"
+def _format_bucket_full_label(dt: datetime, bucket_sec: int) -> str:
+    end_dt = datetime.fromtimestamp(int(dt.timestamp()) + bucket_sec, tz=timezone.utc).astimezone(DISPLAY_TZ)
+    return f"{dt.strftime('%a %d %b %Y, %H:%M')}–{end_dt.strftime('%H:%M')}"
+
+
+def _format_custom_period_label(start_dt: datetime, end_dt: datetime) -> str:
+    if start_dt.date() == end_dt.date():
+        return f"{start_dt.strftime('%a %d %b %Y, %H:%M')}–{end_dt.strftime('%H:%M')}"
+    return f"{start_dt.strftime('%a %d %b %H:%M')} – {end_dt.strftime('%a %d %b %H:%M')}"
 
 
 def collect_traffic_usage(
@@ -767,15 +800,61 @@ def collect_traffic_usage(
     site_name_map: Optional[Dict[str, str]] = None,
     prioritized_site_ids: Optional[List[str]] = None,
     now_ts: Optional[int] = None,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Strictly read-only Mist traffic usage collector across the last N days (default 5)."""
-    if days not in ALLOWED_DAYS:
-        days = 5
+    """Strictly read-only Mist traffic usage collector across a preset (1/5/7d) or custom date/time range."""
+    now_epoch = int(now_ts if now_ts is not None else time.time())
+    is_custom = start_ts is not None or end_ts is not None
 
-    end_ts = int(now_ts if now_ts is not None else time.time())
-    start_ts = end_ts - days * 86400
-    first_bucket = (start_ts // 3600) * 3600
-    last_bucket = (end_ts // 3600) * 3600
+    if is_custom:
+        resolved_end = int(end_ts) if end_ts is not None else now_epoch
+        if resolved_end > now_epoch:
+            resolved_end = now_epoch
+        resolved_start = int(start_ts) if start_ts is not None else (resolved_end - 86400)
+        if resolved_start >= resolved_end:
+            raise ValueError("Start date/time must be earlier than end date/time.")
+        span_sec = resolved_end - resolved_start
+        if span_sec < 1800:
+            raise ValueError("Selected time range must be at least 30 minutes.")
+        if span_sec > 31 * 86400:
+            raise ValueError("Selected time range cannot exceed 31 days.")
+        start_ts_val = resolved_start
+        end_ts_val = resolved_end
+        effective_days = max(1, int(round(span_sec / 86400.0)))
+    else:
+        if days not in ALLOWED_DAYS:
+            days = 5
+        end_ts_val = now_epoch
+        start_ts_val = end_ts_val - days * 86400
+        span_sec = end_ts_val - start_ts_val
+        effective_days = days
+
+    # Use 10-minute buckets when zooming into <= 12h within the last 24h (Mist's 10m retention); hourly otherwise
+    if is_custom and span_sec <= 12 * 3600 and (now_epoch - start_ts_val) <= 86400:
+        bucket_sec = 600
+        interval_str = "600"
+        granularity_label = "10-min buckets"
+    else:
+        bucket_sec = 3600
+        interval_str = "3600"
+        granularity_label = "Hourly buckets"
+
+    first_bucket = (start_ts_val // bucket_sec) * bucket_sec
+    last_bucket = (end_ts_val // bucket_sec) * bucket_sec
+    # If end_ts falls exactly on a bucket boundary for a custom range (e.g. 23:00 or 00:00 next day), avoid trailing empty bucket
+    if is_custom and end_ts_val % bucket_sec == 0 and last_bucket > first_bucket:
+        last_bucket -= bucket_sec
+
+    allow_dur_fallback = (not is_custom) and (now_epoch - end_ts_val) < 600
+
+    dt_start_local = datetime.fromtimestamp(start_ts_val, tz=timezone.utc).astimezone(DISPLAY_TZ)
+    dt_end_local = datetime.fromtimestamp(end_ts_val, tz=timezone.utc).astimezone(DISPLAY_TZ)
+    duration_label = (
+        _format_custom_period_label(dt_start_local, dt_end_local)
+        if is_custom
+        else DAY_LABELS.get(days, f"Last {days} Days")
+    )
 
     sites_map, ordered_site_ids = _load_sites(
         session=session,
@@ -820,7 +899,16 @@ def collect_traffic_usage(
         any_ok = False
         last_err: Optional[str] = None
         for sid in probe_sites:
-            pts, err = _query_site_insights(session, api_host, sid, spec, start_ts, end_ts, "3600")
+            pts, err = _query_site_insights(
+                session,
+                api_host,
+                sid,
+                spec,
+                start_ts_val,
+                end_ts_val,
+                interval_str,
+                allow_duration_fallback=allow_dur_fallback,
+            )
             if pts is not None:
                 any_ok = True
                 spec_hits[sid] = pts
@@ -859,7 +947,17 @@ def collect_traffic_usage(
         max_workers = min(10, len(remaining_ids))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futs = {
-                pool.submit(_query_site_insights, session, api_host, sid, chosen_spec, start_ts, end_ts, "3600"): sid
+                pool.submit(
+                    _query_site_insights,
+                    session,
+                    api_host,
+                    sid,
+                    chosen_spec,
+                    start_ts_val,
+                    end_ts_val,
+                    interval_str,
+                    allow_dur_fallback,
+                ): sid
                 for sid in remaining_ids
             }
             for fut in as_completed(futs):
@@ -876,12 +974,12 @@ def collect_traffic_usage(
     if sites_failed > 0:
         warnings.append(f"{sites_failed} site(s) did not return traffic metrics for this period.")
 
-    # Prepare aligned hourly buckets across the full window
+    # Prepare aligned buckets across the full window
     bucket_totals: Dict[int, List[float]] = {}
     cursor = first_bucket
     while cursor <= last_bucket:
         bucket_totals[cursor] = [0.0, 0.0, 0.0]  # [total_bytes, tx_bytes, rx_bytes]
-        cursor += 3600
+        cursor += bucket_sec
 
     top_sites_raw: List[Dict[str, Any]] = []
     sites_with_data = 0
@@ -892,7 +990,7 @@ def collect_traffic_usage(
             continue
         site_buckets: Dict[int, List[float]] = {}
         for ts, tot_b, tx_b, rx_b in pts:
-            b_ts = (ts // 3600) * 3600
+            b_ts = (ts // bucket_sec) * bucket_sec
             if b_ts < first_bucket or b_ts > last_bucket:
                 continue
             acc = bucket_totals[b_ts]
@@ -915,11 +1013,11 @@ def collect_traffic_usage(
             sites_with_data += 1
         s_peak_mbps = 0.0
         for b_ts, vals in site_buckets.items():
-            eff_sec = max(60, min(3600, end_ts - b_ts)) if b_ts == last_bucket else 3600
+            eff_sec = max(60, min(bucket_sec, end_ts_val - b_ts)) if b_ts == last_bucket else bucket_sec
             mbps = (vals[0] * 8.0) / eff_sec / 1e6
             if mbps > s_peak_mbps:
                 s_peak_mbps = mbps
-        s_avg_mbps = (s_tot * 8.0) / max(1, days * 86400) / 1e6
+        s_avg_mbps = (s_tot * 8.0) / max(1, span_sec) / 1e6
         top_sites_raw.append(
             {
                 "site_id": sid,
@@ -932,7 +1030,7 @@ def collect_traffic_usage(
             }
         )
 
-    # Build hourly points and daily rollups in DISPLAY_TZ
+    # Build time-series points and daily rollups in DISPLAY_TZ
     hourly_points: List[Dict[str, Any]] = []
     daily_map: Dict[str, Dict[str, Any]] = {}
 
@@ -949,8 +1047,8 @@ def collect_traffic_usage(
 
     for b_ts in sorted(bucket_totals.keys()):
         tot_b, tx_b, rx_b = bucket_totals[b_ts]
-        is_partial = b_ts == last_bucket and (end_ts - b_ts) < 3540
-        eff_sec = max(60, min(3600, end_ts - b_ts)) if b_ts == last_bucket else 3600
+        is_partial = b_ts == last_bucket and (end_ts_val - b_ts) < (bucket_sec - 60)
+        eff_sec = max(60, min(bucket_sec, end_ts_val - b_ts)) if b_ts == last_bucket else bucket_sec
 
         avg_mbps = (tot_b * 8.0) / eff_sec / 1e6
         tx_mbps = (tx_b * 8.0) / eff_sec / 1e6
@@ -959,8 +1057,8 @@ def collect_traffic_usage(
         dt_local = datetime.fromtimestamp(b_ts, tz=timezone.utc).astimezone(DISPLAY_TZ)
         day_key = dt_local.strftime("%Y-%m-%d")
         day_label = dt_local.strftime("%a %d %b")
-        full_label = _format_hour_full_label(dt_local)
-        short_label = dt_local.strftime("%a %d %b, %H:00")
+        full_label = _format_bucket_full_label(dt_local, bucket_sec)
+        short_label = dt_local.strftime("%a %d %b, %H:%M")
 
         grand_total_bytes += tot_b
         grand_tx_bytes += tx_b
@@ -978,7 +1076,7 @@ def collect_traffic_usage(
         hourly_points.append(
             {
                 "ts": b_ts,
-                "label": _format_hour_label(dt_local, days),
+                "label": _format_bucket_label(dt_local, span_sec),
                 "full_label": full_label,
                 "day_key": day_key,
                 "total_bytes": int(round(tot_b)),
@@ -1054,18 +1152,24 @@ def collect_traffic_usage(
     avg_rx_mbps_overall = (grand_rx_bytes * 8.0) / max(1, total_elapsed_sec) / 1e6
 
     if grand_total_bytes <= 0 and target_site_ids:
-        probe_diag = _summarize_raw_probe(session, api_host, target_site_ids[0], start_ts, end_ts)
+        probe_diag = _summarize_raw_probe(session, api_host, target_site_ids[0], start_ts_val, end_ts_val)
         if probe_diag:
             warnings.append(f"Mist probe: {probe_diag}")
 
     return {
-        "days": days,
-        "duration_label": DAY_LABELS.get(days, f"Last {days} Days"),
+        "days": effective_days,
+        "is_custom": is_custom,
+        "duration_label": duration_label,
         "site_id": selected_site,
         "site_name": selected_site_name,
         "timezone": DISPLAY_TIMEZONE,
-        "start_ts": start_ts,
-        "end_ts": end_ts,
+        "start_ts": start_ts_val,
+        "end_ts": end_ts_val,
+        "start_local_iso": dt_start_local.strftime("%Y-%m-%dT%H:%M"),
+        "end_local_iso": dt_end_local.strftime("%Y-%m-%dT%H:%M"),
+        "bucket_seconds": bucket_sec,
+        "granularity_label": granularity_label,
+        "can_step_next": end_ts_val < (now_epoch - 300),
         "metric_used": f"{chosen_spec.query_metrics} ({chosen_spec.mode})",
         "metric_kind": chosen_spec.kind,
         "has_rx_tx_split": has_rx_tx_split,

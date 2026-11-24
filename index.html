@@ -146,6 +146,9 @@
     .hist-crumb:hover { border-color: var(--accent); opacity: 1; }
     .hist-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
     .hist-empty { display: none; text-align: center; padding: 64px 20px; color: var(--muted); font-size: 0.92rem; }
+    .dt-picker-group { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); }
+    input.dt-input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; font-size: 0.8rem; font-family: inherit; color-scheme: dark; }
+    input.dt-input:focus { outline: none; border-color: var(--accent); }
     body.wallboard-mode .hist-controls,
     body.wallboard-mode .traffic-controls,
     body.wallboard-mode .nac-controls,
@@ -484,6 +487,23 @@
                 </select>
                 <button id="refreshTrafficBtn" class="btn-secondary" onclick="loadTraffic(true)">Refresh</button>
                 <button id="exportTrafficBtn" class="btn-secondary" onclick="exportTrafficCsv()">Export CSV</button>
+              </div>
+            </div>
+
+            <div class="hist-subbar">
+              <div class="dt-picker-group traffic-controls">
+                <label for="trafficStartInput">From</label>
+                <input id="trafficStartInput" class="dt-input" type="datetime-local" onkeydown="if(event.key==='Enter') applyTrafficCustomRange()" />
+                <label for="trafficEndInput">To</label>
+                <input id="trafficEndInput" class="dt-input" type="datetime-local" onkeydown="if(event.key==='Enter') applyTrafficCustomRange()" />
+                <button id="trafficApplyRangeBtn" class="filter-btn" onclick="applyTrafficCustomRange()">Apply</button>
+                <span id="trafficGranularityBadge" class="pill neutral">Hourly buckets</span>
+              </div>
+              <div class="hist-nav traffic-controls">
+                <button id="trafficPrevBtn" class="filter-btn" onclick="stepTrafficPeriod('prev')">&lsaquo; Prev</button>
+                <span id="trafficPeriodLabel" class="hist-period-label">Last 5 Days</span>
+                <button id="trafficNextBtn" class="filter-btn" onclick="stepTrafficPeriod('next')">Next &rsaquo;</button>
+                <button id="trafficLatestBtn" class="filter-btn" onclick="resetTrafficToLatest()">Latest</button>
               </div>
             </div>
 
@@ -841,7 +861,7 @@
     ];
     let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, trafficChart = null, clientRssiChart = null, countdown = 60, devicesDownTypeFilter = "all";
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
-    let trafficState = { days: 5, siteId: "all", view: "volume", data: null, loading: false };
+    let trafficState = { days: 5, siteId: "all", view: "volume", start: null, end: null, isCustom: false, data: null, loading: false };
     let nacState = { duration: "24h", profile: "all", data: null, loading: false };
     let lookupState = { duration: "7d", results: null, selectedMac: null, selectedSiteId: null, detail: null, eventFilter: "all" };
     let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
@@ -1694,8 +1714,84 @@
     }
     function setTrafficDays(days) {
       trafficState.days = days;
+      trafficState.start = null;
+      trafficState.end = null;
+      trafficState.isCustom = false;
       document.querySelectorAll("[data-traffic-days]").forEach(btn =>
         btn.classList.toggle("active", Number(btn.dataset.trafficDays) === days)
+      );
+      loadTraffic(false);
+    }
+    function applyTrafficCustomRange() {
+      const startVal = (document.getElementById("trafficStartInput")?.value || "").trim();
+      const endVal = (document.getElementById("trafficEndInput")?.value || "").trim();
+      const banner = document.getElementById("errorBanner");
+      if (!startVal || !endVal) {
+        if (banner) {
+          banner.textContent = "Please choose both a From and To date/time.";
+          banner.style.display = "block";
+        }
+        return;
+      }
+      if (startVal >= endVal) {
+        if (banner) {
+          banner.textContent = "Start date/time must be earlier than end date/time.";
+          banner.style.display = "block";
+        }
+        return;
+      }
+      if (banner) banner.style.display = "none";
+      trafficState.start = startVal;
+      trafficState.end = endVal;
+      trafficState.isCustom = true;
+      document.querySelectorAll("[data-traffic-days]").forEach(btn => btn.classList.remove("active"));
+      loadTraffic(false);
+    }
+    function stepTrafficPeriod(dir) {
+      const d = trafficState.data;
+      if (!d || typeof d.start_ts !== "number" || typeof d.end_ts !== "number") return;
+      const span = Math.max(3600, d.end_ts - d.start_ts);
+      const nowSec = Math.floor(Date.now() / 1000);
+      let nextStart, nextEnd;
+      if (dir === "prev") {
+        nextEnd = d.start_ts;
+        nextStart = nextEnd - span;
+      } else {
+        nextStart = d.end_ts;
+        nextEnd = Math.min(nowSec, nextStart + span);
+        if (nextEnd - nextStart < 1800) {
+          resetTrafficToLatest();
+          return;
+        }
+        if (nextEnd >= nowSec - 120 && !trafficState.isCustom) {
+          resetTrafficToLatest();
+          return;
+        }
+      }
+      trafficState.start = String(nextStart);
+      trafficState.end = String(nextEnd);
+      trafficState.isCustom = true;
+      document.querySelectorAll("[data-traffic-days]").forEach(btn => btn.classList.remove("active"));
+      loadTraffic(false);
+    }
+    function resetTrafficToLatest() {
+      trafficState.start = null;
+      trafficState.end = null;
+      trafficState.isCustom = false;
+      document.querySelectorAll("[data-traffic-days]").forEach(btn =>
+        btn.classList.toggle("active", Number(btn.dataset.trafficDays) === trafficState.days)
+      );
+      loadTraffic(false);
+    }
+    function zoomTrafficDay(dateStr) {
+      if (!dateStr) return;
+      trafficState.start = `${dateStr}T00:00`;
+      trafficState.end = `${dateStr}T23:59`;
+      trafficState.isCustom = true;
+      trafficState.view = "volume";
+      document.querySelectorAll("[data-traffic-days]").forEach(btn => btn.classList.remove("active"));
+      document.querySelectorAll("[data-traffic-view]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.trafficView === "volume")
       );
       loadTraffic(false);
     }
@@ -1826,9 +1922,10 @@
           ];
         }
       } else {
-        // Default: Hourly Volume (GB/hr)
+        // Default: Bucket Volume (GB/hr or GB/10m)
+        const is10m = (data.bucket_seconds || 3600) <= 600;
         chartType = "line";
-        yTitle = "Hourly Volume (GB)";
+        yTitle = is10m ? "10-Min Volume (GB)" : "Hourly Volume (GB)";
         if (hasSplit) {
           datasets = [
             {
@@ -1868,7 +1965,7 @@
         } else {
           datasets = [
             {
-              label: "Hourly Traffic (GB)",
+              label: is10m ? "10-Min Traffic (GB)" : "Hourly Traffic (GB)",
               data: hourly.map(p => p.total_gb ?? 0),
               borderColor: "#38bdf8",
               backgroundColor: "rgba(56, 189, 248, 0.16)",
@@ -1890,6 +1987,16 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: "index", intersect: false },
+          onHover: (event, elements) => {
+            const canvas = event?.native?.target;
+            if (!canvas) return;
+            canvas.style.cursor = (view === "daily" && elements && elements.length) ? "pointer" : "default";
+          },
+          onClick: (event, elements) => {
+            if (view !== "daily" || !elements || !elements.length) return;
+            const p = points[elements[0].index];
+            if (p && p.date) zoomTrafficDay(p.date);
+          },
           scales: {
             x: {
               stacked,
@@ -1911,7 +2018,7 @@
                 title: items => {
                   if (!items.length) return "";
                   const p = points[items[0].dataIndex];
-                  const partial = p && p.is_partial_hour ? " (current hour)" : "";
+                  const partial = p && p.is_partial_hour ? " (in progress)" : "";
                   return (p ? p.full_label : items[0].label) + partial;
                 },
                 label: ctx => {
@@ -1924,12 +2031,12 @@
                   const p = points[items[0].dataIndex];
                   if (!p) return "";
                   if (view === "daily") {
-                    return `Total: ${fmtTrafficBytes(p.total_bytes)} · Peak: ${fmtMbps(p.peak_mbps)} · Avg: ${fmtMbps(p.avg_mbps)}`;
+                    return `Total: ${fmtTrafficBytes(p.total_bytes)} · Peak: ${fmtMbps(p.peak_mbps)} · Avg: ${fmtMbps(p.avg_mbps)}\nClick bar to inspect this day`;
                   }
                   if (view === "throughput") {
-                    return `Hour volume: ${fmtTrafficBytes(p.total_bytes)}`;
+                    return `Bucket volume: ${fmtTrafficBytes(p.total_bytes)}`;
                   }
-                  return `Hour avg throughput: ${fmtMbps(p.avg_mbps)}`;
+                  return `Bucket avg throughput: ${fmtMbps(p.avg_mbps)}`;
                 }
               }
             }
@@ -1970,10 +2077,27 @@
       const sum = data.summary || {};
       const durLabel = data.duration_label || "Last 5 Days";
       const hasSplit = Boolean(data.has_rx_tx_split);
+      const isCustom = Boolean(data.is_custom);
 
       document.querySelectorAll("[data-traffic-days]").forEach(btn =>
-        btn.classList.toggle("active", Number(btn.dataset.trafficDays) === data.days)
+        btn.classList.toggle("active", !isCustom && Number(btn.dataset.trafficDays) === data.days)
       );
+
+      const startInp = document.getElementById("trafficStartInput");
+      const endInp = document.getElementById("trafficEndInput");
+      if (startInp && data.start_local_iso) startInp.value = data.start_local_iso;
+      if (endInp && data.end_local_iso) endInp.value = data.end_local_iso;
+
+      const granBadge = document.getElementById("trafficGranularityBadge");
+      if (granBadge) granBadge.textContent = data.granularity_label || "Hourly buckets";
+
+      const periodLbl = document.getElementById("trafficPeriodLabel");
+      if (periodLbl) periodLbl.textContent = durLabel;
+
+      const nextBtn = document.getElementById("trafficNextBtn");
+      const latestBtn = document.getElementById("trafficLatestBtn");
+      if (nextBtn) nextBtn.disabled = !data.can_step_next;
+      if (latestBtn) latestBtn.disabled = !isCustom;
 
       document.getElementById("kpiTrafficTotalLabel").textContent = `Total Traffic (${durLabel})`;
       document.getElementById("kpiTrafficTotal").textContent = fmtTrafficBytes(sum.total_bytes);
@@ -1983,13 +2107,13 @@
 
       document.getElementById("kpiTrafficPeak").textContent = fmtMbps(sum.peak_mbps);
       document.getElementById("kpiTrafficPeakSub").textContent = sum.peak_short_time
-        ? `Peak hour: ${sum.peak_short_time} (${fmtTrafficBytes(sum.peak_hour_bytes)})`
+        ? `Peak: ${sum.peak_short_time} (${fmtTrafficBytes(sum.peak_hour_bytes)})`
         : "No peak recorded";
 
       document.getElementById("kpiTrafficAvg").textContent = fmtMbps(sum.avg_mbps);
       document.getElementById("kpiTrafficAvgSub").textContent = hasSplit
         ? `TX ${fmtMbps(sum.avg_tx_mbps)} · RX ${fmtMbps(sum.avg_rx_mbps)}`
-        : `Sustained avg across ${durLabel.toLowerCase()}`;
+        : `Sustained avg across selected period`;
 
       if (sum.busiest_day) {
         document.getElementById("kpiTrafficBusiestDay").textContent = fmtTrafficBytes(sum.busiest_day.total_bytes);
@@ -2041,15 +2165,25 @@
       if (trafficState.loading && !force) return;
       trafficState.loading = true;
       const btn = document.getElementById("refreshTrafficBtn");
+      const applyBtn = document.getElementById("trafficApplyRangeBtn");
       const statusEl = document.getElementById("trafficStatusMsg");
       const wrapEl = document.getElementById("trafficChartWrap");
       if (btn) btn.disabled = true;
-      if (!silent && !trafficState.data && statusEl && wrapEl) {
-        wrapEl.style.display = "none";
-        statusEl.style.display = "block";
-        statusEl.textContent = `Querying Mist Insights across sites for the last ${trafficState.days === 1 ? "24 hours" : trafficState.days + " days"}...`;
+      if (applyBtn) applyBtn.disabled = true;
+      if (!silent && statusEl && wrapEl) {
+        if (!trafficState.data) {
+          wrapEl.style.display = "none";
+          statusEl.style.display = "block";
+        }
+        statusEl.textContent = trafficState.isCustom
+          ? "Querying Mist Insights for selected date & time range..."
+          : `Querying Mist Insights across sites for the last ${trafficState.days === 1 ? "24 hours" : trafficState.days + " days"}...`;
       }
       const qs = new URLSearchParams({ days: String(trafficState.days), site_id: trafficState.siteId || "all" });
+      if (trafficState.isCustom && trafficState.start && trafficState.end) {
+        qs.set("start", trafficState.start);
+        qs.set("end", trafficState.end);
+      }
       if (force) qs.set("refresh", "1");
       try {
         const res = await fetch(`/api/traffic?${qs.toString()}`);
@@ -2059,6 +2193,8 @@
           return;
         }
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+        const banner = document.getElementById("errorBanner");
+        if (banner) banner.style.display = "none";
         renderTraffic(data);
       } catch (err) {
         if (!silent) {
@@ -2073,6 +2209,7 @@
       } finally {
         trafficState.loading = false;
         if (btn) btn.disabled = false;
+        if (applyBtn) applyBtn.disabled = false;
       }
     }
     function exportTrafficCsv() {

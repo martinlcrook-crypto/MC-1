@@ -13,7 +13,7 @@ import requests
 from history_store import init_history_db, query_history, record_snapshot
 from nac_rejects import collect_nac_server_rejects
 from client_lookup import get_wifi_client_detail, search_wifi_clients
-from traffic_stats import collect_traffic_usage
+from traffic_stats import collect_traffic_usage, parse_local_datetime_to_epoch
 
 
 def load_dotenv(path: Path) -> None:
@@ -1300,8 +1300,9 @@ def api_client_lookup_detail():
 
 
 _traffic_cache_lock = threading.Lock()
-_traffic_cache: Dict[Tuple[int, str], Tuple[float, Dict[str, Any]]] = {}
+_traffic_cache: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
 TRAFFIC_CACHE_TTL_SECONDS = int(os.getenv("TRAFFIC_CACHE_TTL_SECONDS", "300"))
+TRAFFIC_CACHE_MAX_ENTRIES = 64
 
 
 def _cached_prioritized_site_ids() -> List[str]:
@@ -1329,9 +1330,15 @@ def api_traffic():
     if days not in (1, 5, 7):
         days = 5
 
+    try:
+        start_ts = parse_local_datetime_to_epoch(request.args.get("start"))
+        end_ts = parse_local_datetime_to_epoch(request.args.get("end"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
     site_id = (request.args.get("site_id") or "all").strip() or "all"
     force_refresh = request.args.get("refresh") == "1"
-    cache_key = (days, site_id)
+    cache_key = (days, site_id, start_ts, end_ts)
     now = time.time()
 
     with _traffic_cache_lock:
@@ -1360,6 +1367,8 @@ def api_traffic():
             site_id=site_id,
             site_name_map=_cached_site_name_map(),
             prioritized_site_ids=_cached_prioritized_site_ids(),
+            start_ts=start_ts,
+            end_ts=end_ts,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -1373,6 +1382,9 @@ def api_traffic():
 
     fresh["fetched_at"] = datetime.now(timezone.utc).isoformat()
     with _traffic_cache_lock:
+        if len(_traffic_cache) >= TRAFFIC_CACHE_MAX_ENTRIES:
+            oldest_key = min(_traffic_cache.items(), key=lambda kv: kv[1][0])[0]
+            _traffic_cache.pop(oldest_key, None)
         _traffic_cache[cache_key] = (time.time(), fresh)
 
     out = dict(fresh)

@@ -24,6 +24,9 @@
     .badge.readonly { color: var(--green); border-color: rgba(52, 211, 153, 0.35); }
     .badge.region { color: var(--accent); border-color: rgba(56, 189, 248, 0.35); }
     .badge.user { color: var(--eduroam); border-color: rgba(129, 140, 248, 0.4); }
+    .badge.quota-ok { color: var(--green); border-color: rgba(52, 211, 153, 0.35); }
+    .badge.quota-warn { color: var(--amber); border-color: rgba(251, 191, 36, 0.45); }
+    .badge.quota-bad { color: var(--red); border-color: rgba(248, 113, 113, 0.5); }
     .controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
     .meta-text { font-size: 0.82rem; color: var(--muted); }
     button { background: var(--accent); color: #08101e; border: none; border-radius: 8px; padding: 8px 14px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: opacity 0.15s, background 0.15s, border-color 0.15s; }
@@ -184,6 +187,7 @@
         <div class="subtitle">
           <span class="badge readonly">READ-ONLY MODE</span>
           <span class="badge region" id="apiHost">api.eu.mist.com</span>
+          <span class="badge quota-ok" id="apiQuotaBadge" style="display:none;" title="Rolling 1-hour Juniper Mist API calls vs 5,000/hr token limit">API: -- / 5,000 hr</span>
         </div>
       </div>
       <div class="controls">
@@ -428,7 +432,7 @@
               </div>
             </div>
 
-            <div id="histEmptyMsg" class="hist-empty">No Wi-Fi history samples recorded for this period yet. Snapshots are recorded automatically every 5 minutes (1 minute while viewing).</div>
+            <div id="histEmptyMsg" class="hist-empty">No Wi-Fi history samples recorded for this period yet. Snapshots are recorded automatically every 5 minutes.</div>
             <div id="histChartWrap" class="chart-wrap-lg">
               <canvas id="historyChart"></canvas>
             </div>
@@ -859,10 +863,10 @@
       { id: "tab-nac-rejects", label: "NAC Server Rejects", countId: "navNacRejectsCount" },
       { id: "tab-alarms", label: "Recent Alarms", countId: "navAlarmsCount" }
     ];
-    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, trafficChart = null, clientRssiChart = null, countdown = 60, devicesDownTypeFilter = "all";
+    let latestData = null, ssidChart = null, bandChart = null, siteChart = null, historyChart = null, trafficChart = null, clientRssiChart = null, countdown = 300, devicesDownTypeFilter = "all";
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
     let trafficState = { days: 5, siteId: "all", view: "volume", start: null, end: null, isCustom: false, data: null, loading: false };
-    let nacState = { duration: "24h", profile: "all", data: null, loading: false };
+    let nacState = { duration: "24h", profile: "all", data: null, loading: false, fetchedAtMs: 0 };
     let lookupState = { duration: "7d", results: null, selectedMac: null, selectedSiteId: null, detail: null, eventFilter: "all" };
     let activeTabId = "tab-home", wbActive = false, wbPaused = false, wbIntervalSec = 15, wbElapsedMs = 0, wbTimer = null;
     try {
@@ -1284,10 +1288,26 @@
         }
       });
     }
+    function renderApiQuota(quota) {
+      const el = document.getElementById("apiQuotaBadge");
+      if (!el || !quota || typeof quota.calls_last_hour !== "number") return;
+      const calls = quota.calls_last_hour;
+      const limit = quota.hourly_limit || 5000;
+      const pct = typeof quota.pct_used === "number" ? quota.pct_used : (limit > 0 ? Math.round((calls / limit) * 1000) / 10 : 0);
+      const cls = pct >= 85 ? "quota-bad" : pct >= 60 ? "quota-warn" : "quota-ok";
+      el.className = `badge ${cls}`;
+      el.textContent = `API: ${fmtNum(calls)} / ${fmtNum(limit)} hr (${pct}%)`;
+      const lastSnap = typeof quota.last_snapshot_calls === "number" && quota.last_snapshot_calls > 0
+        ? ` · Last dashboard sync: ${quota.last_snapshot_calls} calls`
+        : "";
+      el.title = `Rolling 1-hour Juniper Mist API calls: ${fmtNum(calls)} of ${fmtNum(limit)} (${pct}%)${lastSnap}`;
+      el.style.display = "inline-flex";
+    }
     function renderDashboard(data) {
       latestData = data; const sum = data.summary || {};
       document.getElementById("orgName").textContent = `${data.org?.name || "Mist"} — Wireless & eduroam`;
       document.getElementById("apiHost").textContent = (data.org?.api_host || "api.eu.mist.com").replace(/^https?:\/\//, "");
+      if (data.api_quota) renderApiQuota(data.api_quota);
 
       document.getElementById("kpiTotal").textContent = fmtNum(sum.total_wireless_users);
       document.getElementById("kpiTotalSub").textContent = `${fmtNum(sum.other_wireless_users ?? 0)} on other SSIDs`;
@@ -1369,8 +1389,11 @@
       if (!histState.data || (activeTabId === "tab-history" && !histState.anchor)) {
         loadHistory(true);
       }
-      if (!nacState.data || activeTabId === "tab-nac-rejects") {
-        loadNacRejects(false, true);
+      if (activeTabId === "tab-nac-rejects") {
+        const nacTtlMs = (nacState.data?.cache_ttl_seconds || 600) * 1000;
+        if (!nacState.data || (Date.now() - nacState.fetchedAtMs) >= nacTtlMs) {
+          loadNacRejects(false, true);
+        }
       }
     }
 
@@ -2188,6 +2211,7 @@
       try {
         const res = await fetch(`/api/traffic?${qs.toString()}`);
         const data = await res.json().catch(() => ({}));
+        if (data.api_quota) renderApiQuota(data.api_quota);
         if (res.status === 401 || data.login_required) {
           window.location.href = "/login";
           return;
@@ -2344,6 +2368,8 @@
     }
     function renderNacRejects(data) {
       nacState.data = data;
+      nacState.fetchedAtMs = Date.now();
+      if (data.api_quota) renderApiQuota(data.api_quota);
       const sum = data.summary || {};
       const total = sum.total_rejected ?? 0;
 
@@ -2848,21 +2874,27 @@
       } catch (e) {}
       window.location.href = "/login";
     }
+    let statsLoading = false;
+    let lastStatsLoadMs = 0;
     async function loadStats(force = false) {
+      if (statsLoading && !force) return;
+      statsLoading = true;
       const btn = document.getElementById("refreshBtn"), banner = document.getElementById("errorBanner");
       btn.disabled = true; banner.style.display = "none";
       try {
         const res = await fetch(force ? "/api/stats?refresh=1" : "/api/stats");
         const data = await res.json().catch(() => ({}));
+        if (data.api_quota) renderApiQuota(data.api_quota);
         if (res.status === 401 || data.login_required) {
           window.location.href = "/login";
           return;
         }
         if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
-        countdown = data.cache_ttl_seconds || 180; renderDashboard(data);
+        lastStatsLoadMs = Date.now();
+        countdown = data.cache_ttl_seconds || 300; renderDashboard(data);
         if (data.warnings && data.warnings.length) { banner.textContent = "Partial data notice: " + data.warnings.join(" | "); banner.style.display = "block"; }
       } catch (err) { banner.textContent = "Error loading Mist data: " + err.message; banner.style.display = "block"; }
-      finally { btn.disabled = false; }
+      finally { statsLoading = false; btn.disabled = false; }
     }
     document.addEventListener("keydown", ev => {
       if (!wbActive) return;
@@ -2872,9 +2904,18 @@
       else if (ev.key === " " || ev.code === "Space") { ev.preventDefault(); toggleWallboardPause(); }
       else if (ev.key === "Escape") { ev.preventDefault(); toggleWallboardMode(false); }
     });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      const ttlMs = (latestData?.cache_ttl_seconds || 300) * 1000;
+      if (!lastStatsLoadMs || (Date.now() - lastStatsLoadMs) >= ttlMs) {
+        countdown = latestData?.cache_ttl_seconds || 300;
+        loadStats(false);
+      }
+    });
     setInterval(() => {
+      if (document.hidden) return;
       countdown -= 1;
-      if (countdown <= 0) { countdown = latestData?.cache_ttl_seconds || 180; loadStats(false); }
+      if (countdown <= 0) { countdown = latestData?.cache_ttl_seconds || 300; loadStats(false); }
       else if (latestData) { const fetched = latestData.fetched_at ? new Date(latestData.fetched_at).toLocaleTimeString() : "just now"; document.getElementById("lastUpdated").textContent = `Updated ${fetched} · next refresh in ${countdown}s`; }
     }, 1000);
     (() => {

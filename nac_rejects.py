@@ -6,6 +6,8 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
+from traffic_stats import MistRateLimitError
+
 MAC_CLEAN_RE = re.compile(r"[^0-9a-fA-F]")
 MAC_IN_TEXT_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b|\b[0-9a-fA-F]{12}\b")
 PORT_IN_TEXT_RE = re.compile(r"\b(?:ge|xe|mge|et|ae)-\d+/\d+/\d+(?:\.\d+)?\b", re.IGNORECASE)
@@ -28,7 +30,7 @@ def _mist_search_get(
     api_host: str,
     path: str,
     params: Optional[Dict[str, Any]] = None,
-    max_pages: int = 5,
+    max_pages: int = 3,
 ) -> List[Dict[str, Any]]:
     """Strictly read-only GET helper for Mist */search endpoints supporting search_after pagination."""
     results: List[Dict[str, Any]] = []
@@ -37,6 +39,10 @@ def _mist_search_get(
 
     for _ in range(max_pages):
         resp = session.get(f"{api_host}{path}", params=req_params, timeout=20)
+        if resp.status_code == 429:
+            raise MistRateLimitError(
+                "Juniper Mist API rate limit reached (HTTP 429). Please wait a few minutes and try again."
+            )
         if resp.status_code in (403, 404):
             return results
         resp.raise_for_status()
@@ -246,6 +252,7 @@ def collect_nac_server_rejects(
     duration: str = "24h",
     site_name_map: Optional[Dict[str, str]] = None,
     switch_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    network_templates: Optional[List[Dict[str, Any]]] = None,
     now_ts: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
@@ -271,6 +278,8 @@ def collect_nac_server_rejects(
     def safe_call(label: str, fn: Callable[[], Any], default: Any) -> Any:
         try:
             return fn()
+        except MistRateLimitError:
+            raise
         except Exception as exc:
             warnings.append(f"{label}: {exc}")
             return default
@@ -280,6 +289,10 @@ def collect_nac_server_rejects(
         if sites_by_id:
             return None
         resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/sites", timeout=20)
+        if resp.status_code == 429:
+            raise MistRateLimitError(
+                "Juniper Mist API rate limit reached (HTTP 429). Please wait a few minutes and try again."
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -291,11 +304,21 @@ def collect_nac_server_rejects(
             params={"type": "switch", "status": "all", "limit": 1000},
             timeout=20,
         )
+        if resp.status_code == 429:
+            raise MistRateLimitError(
+                "Juniper Mist API rate limit reached (HTTP 429). Please wait a few minutes and try again."
+            )
         resp.raise_for_status()
         return resp.json()
 
     def fetch_templates():
+        if network_templates is not None:
+            return network_templates
         resp = session.get(f"{api_host}/api/v1/orgs/{org_id}/networktemplates", timeout=20)
+        if resp.status_code == 429:
+            raise MistRateLimitError(
+                "Juniper Mist API rate limit reached (HTTP 429). Please wait a few minutes and try again."
+            )
         if resp.status_code in (403, 404):
             return []
         resp.raise_for_status()
@@ -588,7 +611,7 @@ def collect_nac_server_rejects(
                     api_host,
                     f"/api/v1/orgs/{org_id}/stats/ports/search",
                     {"device_type": "switch", "mac": ",".join(c), "limit": 1000},
-                    max_pages=3,
+                    max_pages=2,
                 ),
                 [],
             )

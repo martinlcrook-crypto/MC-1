@@ -1338,6 +1338,7 @@
     body.wallboard-mode #exportTrafficBtn,
     body.wallboard-mode #exportNacRejectsBtn,
     body.wallboard-mode #exportVcTempsBtn,
+    body.wallboard-mode #exportVcEx4kBtn,
     body.wallboard-mode #exportVcMemberIssuesBtn,
     body.wallboard-mode #scanVcMembersBtn { display: none !important; }
     body.wallboard-mode .title-block h1 { font-size: 1.9rem; }
@@ -2485,8 +2486,42 @@
             </div>
 
             <div class="hist-footer">
-              <span id="vcTempsMetaLeft">Ranks Top 10 hottest Virtual Chassis by peak FPC sensor temperature; alarms any VC &ge; threshold or reporting a hardware thermal fault.</span>
+              <span id="vcTempsMetaLeft">Ranks Top 10 hottest Virtual Chassis by peak FPC sensor temperature (excluding EX4000 / EX4100 series); alarms any VC &ge; threshold or reporting a hardware thermal fault.</span>
               <span id="vcTempsMetaRight">Not scanned yet</span>
+            </div>
+          </div>
+
+          <div id="vcEx4kPanel" class="panel" style="display:none;margin-top:16px;">
+            <div class="panel-header">
+              <div class="panel-actions">
+                <h2 class="panel-title">Top 10 Hottest EX4000 / EX4100 Switches</h2>
+                <span id="vcEx4kBadge" class="pill neutral">0 Switches</span>
+                <span class="pill neutral" title="Temporarily separated from primary Hottest VCs KPIs, chart, and Homescreen thermal alarm banner">Separate Table</span>
+              </div>
+              <div class="panel-actions">
+                <input id="vcEx4kFilter" class="search" type="search" placeholder="Filter EX4000 / EX4100, site, MAC..." oninput="renderEx4kVcTable()" />
+                <button id="exportVcEx4kBtn" class="btn-secondary" onclick="exportVcEx4kCsv()" disabled>Export CSV</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Switch / VC &amp; IP / MAC</th>
+                    <th>Site</th>
+                    <th>Peak Temp</th>
+                    <th>Hottest Member &amp; Stack Sensors</th>
+                    <th>Fans / PSUs</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="vcEx4kBody"></tbody>
+              </table>
+            </div>
+            <div class="hist-footer">
+              <span>EX4000 / EX4100 switches are tracked in this separate Top 10 table and excluded from the primary Hottest VCs chart, KPIs, and Homescreen thermal alarm banner.</span>
+              <span id="vcEx4kMetaRight">--</span>
             </div>
           </div>
         </div>
@@ -3780,27 +3815,54 @@
       renderVcTempsSection();
     }
 
+    const EX4000_4100_MODEL_RE = /(?:^|[^0-9])(?:ex)?(?:4000|4100|41000)(?:[^0-9]|$)/i;
+
+    function isEx4000Or4100Item(item) {
+      if (!item) return false;
+      if (item.is_ex4000_4100 === true) return true;
+      if (item.model && EX4000_4100_MODEL_RE.test(String(item.model))) return true;
+      if (Array.isArray(item.members)) {
+        return item.members.some(m => m && m.model && EX4000_4100_MODEL_RE.test(String(m.model)));
+      }
+      return false;
+    }
+
+    function getMainVcTemps() {
+      return (latestData?.vc_temps || []).filter(x => !isEx4000Or4100Item(x));
+    }
+
+    function getEx4kVcTemps() {
+      return (latestData?.vc_temps || []).filter(x => isEx4000Or4100Item(x));
+    }
+
     function getScopedVcTemps() {
-      const allItems = latestData?.vc_temps || [];
-      if (vcTempState.scope === "all") return allItems;
-      return allItems.filter(x => x.is_vc);
+      const mainItems = getMainVcTemps();
+      if (vcTempState.scope === "all") return mainItems;
+      return mainItems.filter(x => x.is_vc);
+    }
+
+    function matchesVcTempQuery(item, q) {
+      if (!q) return true;
+      return (
+        (item.name || "").toLowerCase().includes(q) ||
+        (item.site_name || "").toLowerCase().includes(q) ||
+        (item.model || "").toLowerCase().includes(q) ||
+        (item.mac || "").toLowerCase().includes(q) ||
+        (item.vc_mac || "").toLowerCase().includes(q) ||
+        (item.ip || "").toLowerCase().includes(q) ||
+        (item.hottest_sensor || "").toLowerCase().includes(q) ||
+        (item.hottest_member || "").toLowerCase().includes(q)
+      );
     }
 
     function getFilteredVcTemps() {
       const q = (document.getElementById("vcTempsFilter")?.value || "").trim().toLowerCase();
-      return getScopedVcTemps().filter(item => {
-        if (!q) return true;
-        return (
-          (item.name || "").toLowerCase().includes(q) ||
-          (item.site_name || "").toLowerCase().includes(q) ||
-          (item.model || "").toLowerCase().includes(q) ||
-          (item.mac || "").toLowerCase().includes(q) ||
-          (item.vc_mac || "").toLowerCase().includes(q) ||
-          (item.ip || "").toLowerCase().includes(q) ||
-          (item.hottest_sensor || "").toLowerCase().includes(q) ||
-          (item.hottest_member || "").toLowerCase().includes(q)
-        );
-      });
+      return getScopedVcTemps().filter(item => matchesVcTempQuery(item, q));
+    }
+
+    function getFilteredEx4kVcTemps() {
+      const q = (document.getElementById("vcEx4kFilter")?.value || "").trim().toLowerCase();
+      return getEx4kVcTemps().filter(item => matchesVcTempQuery(item, q));
     }
 
     function renderVcTempsChart(top10, thresholdC) {
@@ -3915,15 +3977,16 @@
 
     function renderVcTempsSection() {
       const meta = latestData?.vc_temps_meta || {};
-      const allItems = latestData?.vc_temps || [];
+      const mainItems = getMainVcTemps();
+      const mainVcsCount = mainItems.filter(x => x.is_vc).length;
       const scanned = Boolean(meta.scanned);
       const thresholdC = typeof meta.threshold_c === "number" ? meta.threshold_c : 60;
       const warnC = typeof meta.warn_c === "number" ? meta.warn_c : Math.max(20, thresholdC - 5);
       const estCalls = meta.estimated_calls || latestData?.estimates?.vc_temps_scan_calls || 1;
       const activeSwSites = meta.active_switch_sites_count || estCalls;
 
-      // Auto-select All Switches only if scanned and org has 0 multi-member VCs
-      if (scanned && !vcTempState.autoScoped && (meta.vc_count || 0) === 0 && allItems.length > 0) {
+      // Auto-select All Switches only if scanned and org has 0 non-EX4000/4100 multi-member VCs
+      if (scanned && !vcTempState.autoScoped && mainVcsCount === 0 && mainItems.length > 0) {
         vcTempState.scope = "all";
         vcTempState.autoScoped = true;
       }
@@ -3933,8 +3996,8 @@
 
       const vcCountEl = document.getElementById("vcScopeVcCount");
       const allCountEl = document.getElementById("vcScopeAllCount");
-      if (vcCountEl) vcCountEl.textContent = fmtNum(meta.vc_count || 0);
-      if (allCountEl) allCountEl.textContent = fmtNum(meta.switch_count || allItems.length);
+      if (vcCountEl) vcCountEl.textContent = fmtNum(mainVcsCount);
+      if (allCountEl) allCountEl.textContent = fmtNum(mainItems.length);
 
       const threshInp = document.getElementById("vcThresholdInput");
       if (threshInp && document.activeElement !== threshInp) threshInp.value = String(thresholdC);
@@ -3980,6 +4043,7 @@
       const chartWrap = document.getElementById("vcTempsChartWrap");
       const tableWrap = document.getElementById("vcTempsTableWrap");
       const alarmsPanel = document.getElementById("vcActiveAlarmsPanel");
+      const ex4kPanel = document.getElementById("vcEx4kPanel");
       const exportBtn = document.getElementById("exportVcTempsBtn");
 
       if (vcTempState.scanning) {
@@ -3987,6 +4051,7 @@
         if (chartWrap) chartWrap.style.display = "none";
         if (tableWrap) tableWrap.style.display = "none";
         if (alarmsPanel) alarmsPanel.style.display = "none";
+        if (ex4kPanel) ex4kPanel.style.display = "none";
         if (skel) skel.style.display = "flex";
         return;
       }
@@ -3998,6 +4063,7 @@
         if (chartWrap) chartWrap.style.display = "none";
         if (tableWrap) tableWrap.style.display = "none";
         if (alarmsPanel) alarmsPanel.style.display = "none";
+        if (ex4kPanel) ex4kPanel.style.display = "none";
         if (exportBtn) exportBtn.disabled = true;
         document.getElementById("kpiVcAlarmsSub").textContent = `Alarm threshold: ≥ ${thresholdC}°C`;
         const badge = document.getElementById("vcTempsBadge");
@@ -4125,74 +4191,14 @@
       const tbody = document.getElementById("vcTempsBody");
       if (tbody) {
         if (!scopedAll.length) {
-          const hint = vcTempState.scope === "vc" && allItems.length > 0
-            ? 'No multi-member Virtual Chassis found — click "All Switches" above to view standalone switch temperatures.'
-            : "No switches reported temperature sensor telemetry in Mist.";
+          const hint = vcTempState.scope === "vc" && mainItems.length > 0
+            ? 'No multi-member Virtual Chassis found (excluding EX4000 / EX4100) — click "All Switches" above to view standalone switch temperatures.'
+            : "No non-EX4000/4100 switches reported temperature sensor telemetry in Mist.";
           tbody.innerHTML = `<tr><td colspan="7" class="empty">${hint}</td></tr>`;
         } else if (!top10.length) {
           tbody.innerHTML = '<tr><td colspan="7" class="empty">No Virtual Chassis match the current filter.</td></tr>';
         } else {
-          tbody.innerHTML = top10.map((vc, idx) => {
-            const rank = idx + 1;
-            const isAlarm = vc.alarm_state === "alarm";
-            const isWarn = vc.alarm_state === "warn";
-            const rankCls = isAlarm ? "alarm" : (rank <= 3 ? "top3" : "");
-            const barColor = isAlarm ? "var(--red)" : (isWarn ? "var(--amber)" : "var(--accent)");
-            const barPct = Math.min(100, Math.max(8, (Number(vc.peak_temp_c || 0) / Math.max(85, thresholdC + 20)) * 100));
-            const deltaTxt = vc.delta_threshold_c >= 0 ? `+${vc.delta_threshold_c}°C` : `${vc.delta_threshold_c}°C`;
-
-            const metaParts = [];
-            if (vc.model) metaParts.push(escapeHtml(vc.model));
-            if (vc.is_vc) metaParts.push(`<span class="pill type-switch">${vc.member_count}-member VC</span>`);
-            if (vc.ip) metaParts.push(renderCopyable(vc.ip, "IP"));
-            if (vc.vc_mac || vc.mac) metaParts.push(renderCopyable(vc.vc_mac || vc.mac, vc.vc_mac ? "VC MAC" : "MAC"));
-
-            const memberChips = (vc.members || []).slice(0, 6).map(m => {
-              const mCls = (m.peak_temp_c >= thresholdC || m.sensor_alarm) ? "alarm" : (m.peak_temp_c >= warnC ? "warn" : "");
-              return `<span class="member-chip ${mCls}" title="${escapeHtml(m.hottest_sensor || "")}">FPC${m.fpc_idx}: ${m.peak_temp_c}°C</span>`;
-            }).join("");
-
-            const hwParts = [];
-            if (vc.fans_total > 0) {
-              hwParts.push(vc.fans_bad > 0
-                ? `<span class="pill bad">${vc.fans_bad}/${vc.fans_total} Fan Fault</span>`
-                : `<span class="pill ok">Fans OK (${vc.fans_total})</span>`);
-            }
-            if (vc.psus_total > 0) {
-              hwParts.push(vc.psus_bad > 0
-                ? `<span class="pill bad">${vc.psus_bad}/${vc.psus_total} PSU Fault</span>`
-                : `<span class="pill ok">PSUs OK (${vc.psus_total})</span>`);
-            }
-            const hwCell = hwParts.length ? hwParts.join(" ") : '<span class="meta-text">--</span>';
-
-            const statusPill = isAlarm
-              ? `<span class="pill bad">ALARM &ge; ${thresholdC}°C</span>`
-              : isWarn
-              ? `<span class="pill warn">Warm (&ge; ${warnC}°C)</span>`
-              : `<span class="pill ok">Normal</span>`;
-
-            return `<tr class="${isAlarm ? "thermal-alarm-row" : ""}">
-              <td><span class="rank-badge ${rankCls}">#${rank}</span></td>
-              <td><strong>${escapeHtml(vc.name)}</strong>${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
-              <td>${escapeHtml(vc.site_name)}</td>
-              <td>
-                <div class="temp-cell">
-                  <div class="temp-val-row">
-                    <span class="temp-val ${vc.alarm_state}">${escapeHtml(vc.peak_temp_c)}°C</span>
-                    <span class="temp-delta ${isAlarm ? "alarm" : ""}">${escapeHtml(deltaTxt)}</span>
-                  </div>
-                  <div class="temp-bar-track"><div class="temp-bar-fill" style="width:${barPct.toFixed(1)}%;background:${barColor};"></div></div>
-                </div>
-              </td>
-              <td>
-                <strong>${escapeHtml(vc.hottest_member || "Chassis")}</strong>
-                <span class="sub-cell">${escapeHtml(vc.hottest_sensor || "Sensor")} · avg ${escapeHtml(vc.avg_temp_c)}°C</span>
-                ${memberChips ? `<div class="member-chips">${memberChips}</div>` : ""}
-              </td>
-              <td>${hwCell}</td>
-              <td>${statusPill}</td>
-            </tr>`;
-          }).join("");
+          tbody.innerHTML = renderThermalTableRows(top10, thresholdC, warnC);
         }
       }
 
@@ -4202,7 +4208,140 @@
         const srcTxt = meta.source === "org_stats" ? "org switch stats (0 extra calls)" : (typeof meta.calls_used === "number" ? fmtCalls(meta.calls_used) : "on-demand scan");
         rightMeta.textContent = `Updated ${when} · ${srcTxt}`;
       }
+
+      renderEx4kVcTable();
       renderWallboardTabs();
+    }
+
+    function renderThermalTableRows(items, thresholdC, warnC) {
+      return items.map((vc, idx) => {
+        const rank = idx + 1;
+        const isAlarm = vc.alarm_state === "alarm";
+        const isWarn = vc.alarm_state === "warn";
+        const rankCls = isAlarm ? "alarm" : (rank <= 3 ? "top3" : "");
+        const barColor = isAlarm ? "var(--red)" : (isWarn ? "var(--amber)" : "var(--accent)");
+        const barPct = Math.min(100, Math.max(8, (Number(vc.peak_temp_c || 0) / Math.max(85, thresholdC + 20)) * 100));
+        const deltaTxt = vc.delta_threshold_c >= 0 ? `+${vc.delta_threshold_c}°C` : `${vc.delta_threshold_c}°C`;
+
+        const metaParts = [];
+        if (vc.model) metaParts.push(escapeHtml(vc.model));
+        if (vc.is_vc) metaParts.push(`<span class="pill type-switch">${vc.member_count}-member VC</span>`);
+        if (vc.ip) metaParts.push(renderCopyable(vc.ip, "IP"));
+        if (vc.vc_mac || vc.mac) metaParts.push(renderCopyable(vc.vc_mac || vc.mac, vc.vc_mac ? "VC MAC" : "MAC"));
+
+        const memberChips = (vc.members || []).slice(0, 6).map(m => {
+          const mCls = (m.peak_temp_c >= thresholdC || m.sensor_alarm) ? "alarm" : (m.peak_temp_c >= warnC ? "warn" : "");
+          return `<span class="member-chip ${mCls}" title="${escapeHtml(m.hottest_sensor || "")}">FPC${m.fpc_idx}: ${m.peak_temp_c}°C</span>`;
+        }).join("");
+
+        const hwParts = [];
+        if (vc.fans_total > 0) {
+          hwParts.push(vc.fans_bad > 0
+            ? `<span class="pill bad">${vc.fans_bad}/${vc.fans_total} Fan Fault</span>`
+            : `<span class="pill ok">Fans OK (${vc.fans_total})</span>`);
+        }
+        if (vc.psus_total > 0) {
+          hwParts.push(vc.psus_bad > 0
+            ? `<span class="pill bad">${vc.psus_bad}/${vc.psus_total} PSU Fault</span>`
+            : `<span class="pill ok">PSUs OK (${vc.psus_total})</span>`);
+        }
+        const hwCell = hwParts.length ? hwParts.join(" ") : '<span class="meta-text">--</span>';
+
+        const statusPill = isAlarm
+          ? `<span class="pill bad">ALARM &ge; ${thresholdC}°C</span>`
+          : isWarn
+          ? `<span class="pill warn">Warm (&ge; ${warnC}°C)</span>`
+          : `<span class="pill ok">Normal</span>`;
+
+        return `<tr class="${isAlarm ? "thermal-alarm-row" : ""}">
+          <td><span class="rank-badge ${rankCls}">#${rank}</span></td>
+          <td><strong>${escapeHtml(vc.name)}</strong>${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
+          <td>${escapeHtml(vc.site_name)}</td>
+          <td>
+            <div class="temp-cell">
+              <div class="temp-val-row">
+                <span class="temp-val ${vc.alarm_state}">${escapeHtml(vc.peak_temp_c)}°C</span>
+                <span class="temp-delta ${isAlarm ? "alarm" : ""}">${escapeHtml(deltaTxt)}</span>
+              </div>
+              <div class="temp-bar-track"><div class="temp-bar-fill" style="width:${barPct.toFixed(1)}%;background:${barColor};"></div></div>
+            </div>
+          </td>
+          <td>
+            <strong>${escapeHtml(vc.hottest_member || "Chassis")}</strong>
+            <span class="sub-cell">${escapeHtml(vc.hottest_sensor || "Sensor")} · avg ${escapeHtml(vc.avg_temp_c)}°C</span>
+            ${memberChips ? `<div class="member-chips">${memberChips}</div>` : ""}
+          </td>
+          <td>${hwCell}</td>
+          <td>${statusPill}</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function renderEx4kVcTable() {
+      const panel = document.getElementById("vcEx4kPanel");
+      const tbody = document.getElementById("vcEx4kBody");
+      const badge = document.getElementById("vcEx4kBadge");
+      const exportBtn = document.getElementById("exportVcEx4kBtn");
+      const rightMeta = document.getElementById("vcEx4kMetaRight");
+      const meta = latestData?.vc_temps_meta || {};
+      const scanned = Boolean(meta.scanned);
+      if (!panel || !tbody) return;
+      if (!scanned || vcTempState.scanning) {
+        panel.style.display = "none";
+        return;
+      }
+
+      const thresholdC = typeof meta.threshold_c === "number" ? meta.threshold_c : 60;
+      const warnC = typeof meta.warn_c === "number" ? meta.warn_c : Math.max(20, thresholdC - 5);
+      const allEx4k = getEx4kVcTemps();
+      const filteredEx4k = getFilteredEx4kVcTemps();
+      const top10Ex4k = filteredEx4k.slice(0, 10);
+
+      panel.style.display = "block";
+      if (exportBtn) exportBtn.disabled = filteredEx4k.length === 0;
+      if (badge) {
+        if (allEx4k.length === 0) {
+          badge.textContent = "0 Switches";
+          badge.className = "pill neutral";
+        } else {
+          const hotCnt = allEx4k.filter(x => x.above_threshold).length;
+          badge.textContent = hotCnt > 0
+            ? `Top ${Math.min(10, allEx4k.length)} of ${fmtNum(allEx4k.length)} · ${fmtNum(hotCnt)} ≥ ${thresholdC}°C`
+            : `Top ${Math.min(10, allEx4k.length)} of ${fmtNum(allEx4k.length)}`;
+          badge.className = `pill ${hotCnt > 0 ? "warn" : "ok"}`;
+        }
+      }
+      if (rightMeta) {
+        rightMeta.textContent = allEx4k.length
+          ? `Peak EX4000/4100: ${allEx4k[0].peak_temp_c}°C (${allEx4k[0].name}) · ${fmtNum(allEx4k.length)} total monitored`
+          : "No EX4000 / EX4100 switches reporting temps";
+      }
+
+      if (!allEx4k.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No EX4000 or EX4100 switches reported temperature telemetry in Mist.</td></tr>';
+      } else if (!top10Ex4k.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">No EX4000 / EX4100 switches match the current filter.</td></tr>';
+      } else {
+        tbody.innerHTML = renderThermalTableRows(top10Ex4k, thresholdC, warnC);
+      }
+    }
+
+    function exportVcEx4kCsv() {
+      const rows = getFilteredEx4kVcTemps();
+      if (!rows.length) return;
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      downloadCsv(
+        `mist-hottest-ex4000-ex4100-${dateStamp}.csv`,
+        ["Rank", "Name", "Type", "Members", "Site", "Model", "IP", "MAC", "Peak Temp (C)", "Avg Temp (C)", "Threshold (C)", "Delta (C)", "Status", "Hottest Member", "Hottest Sensor", "Fans Bad/Total", "PSUs Bad/Total"],
+        rows.map((vc, idx) => [
+          idx + 1, vc.name ?? "", vc.is_vc ? "VC" : "Switch", vc.member_count ?? 1,
+          vc.site_name ?? "", vc.model ?? "", vc.ip ?? "", vc.vc_mac || vc.mac || "",
+          vc.peak_temp_c ?? "", vc.avg_temp_c ?? "", vc.threshold_c ?? "", vc.delta_threshold_c ?? "",
+          vc.above_threshold ? "ALARM" : (vc.alarm_state || "ok"),
+          vc.hottest_member ?? "", vc.hottest_sensor ?? "",
+          `${vc.fans_bad ?? 0}/${vc.fans_total ?? 0}`, `${vc.psus_bad ?? 0}/${vc.psus_total ?? 0}`
+        ])
+      );
     }
 
     async function scanVcTemps(force = true) {

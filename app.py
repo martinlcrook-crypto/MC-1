@@ -398,13 +398,16 @@ def extract_switch_thermal_info(sw: Dict[str, Any], site_name: str) -> Optional[
     sw_ip = str(sw.get("ip") or ip_stat.get("ip") or "").strip()
     sw_mac = format_mac(sw.get("mac")) if sw.get("mac") else ""
     vc_mac = format_mac(vc_mac_raw) if vc_mac_raw else ""
+    sw_model = str(sw.get("model") or "")
+    is_ex4k = _is_ex4000_or_4100_switch(sw_model, module_stat)
 
     return {
         "id": str(sw.get("id") or sw_mac or sw.get("name") or ""),
         "name": str(sw.get("name") or sw_mac or "Unnamed Switch"),
         "site_id": str(sw.get("site_id") or ""),
         "site_name": site_name,
-        "model": str(sw.get("model") or ""),
+        "model": sw_model,
+        "is_ex4000_4100": is_ex4k,
         "mac": sw_mac,
         "vc_mac": vc_mac,
         "ip": sw_ip,
@@ -427,6 +430,22 @@ def extract_switch_thermal_info(sw: Dict[str, Any], site_name: str) -> Optional[
     }
 
 
+_EX4000_4100_MODEL_RE = re.compile(r"(?:^|[^0-9])(?:ex)?(?:4000|4100|41000)(?:[^0-9]|$)", re.IGNORECASE)
+
+
+def _is_ex4000_or_4100_switch(model: Any, members: Optional[List[Dict[str, Any]]] = None) -> bool:
+    """Return True if a switch or any of its VC members is an EX4000 / EX4100 (or 41000) series model."""
+    if model and _EX4000_4100_MODEL_RE.search(str(model)):
+        return True
+    if isinstance(members, list):
+        for m in members:
+            if isinstance(m, dict):
+                m_model = m.get("model")
+                if m_model and _EX4000_4100_MODEL_RE.search(str(m_model)):
+                    return True
+    return False
+
+
 def _build_vc_temps_view(
     raw_items: Optional[List[Dict[str, Any]]],
     active_switch_sites_count: Optional[int] = None,
@@ -445,6 +464,9 @@ def _build_vc_temps_view(
     evaluated: List[Dict[str, Any]] = []
     for item in items_src:
         rec = dict(item)
+        rec["is_ex4000_4100"] = bool(rec.get("is_ex4000_4100")) or _is_ex4000_or_4100_switch(
+            rec.get("model"), rec.get("members")
+        )
         peak = float(rec.get("peak_temp_c") or 0.0)
         sensor_alarm = bool(rec.get("sensor_status_alarm"))
         above_thresh = (peak >= threshold_c) or sensor_alarm
@@ -462,10 +484,14 @@ def _build_vc_temps_view(
 
     evaluated.sort(key=lambda x: (-float(x.get("peak_temp_c") or 0.0), -int(bool(x.get("is_vc"))), str(x.get("name") or "").lower()))
 
-    vc_only = [x for x in evaluated if x.get("is_vc")]
-    primary_list = vc_only if vc_only else evaluated
+    # Exclude EX4000 / EX4100 switches from primary Hottest VCs KPIs & alarms (tracked in separate Top 10 table)
+    main_evaluated = [x for x in evaluated if not x.get("is_ex4000_4100")]
+    ex4k_evaluated = [x for x in evaluated if x.get("is_ex4000_4100")]
+
+    vc_only = [x for x in main_evaluated if x.get("is_vc")]
+    primary_list = vc_only if vc_only else main_evaluated
     alarmed_vcs = [x for x in vc_only if x.get("above_threshold")]
-    alarmed_all = [x for x in evaluated if x.get("above_threshold")]
+    alarmed_all = [x for x in main_evaluated if x.get("above_threshold")]
     max_temp = primary_list[0]["peak_temp_c"] if primary_list else None
     avg_temp = round(sum(float(x["peak_temp_c"]) for x in primary_list) / len(primary_list), 1) if primary_list else None
     hw_faults = sum(int(x.get("fans_bad") or 0) + int(x.get("psus_bad") or 0) for x in primary_list)
@@ -480,7 +506,9 @@ def _build_vc_temps_view(
         "threshold_c": threshold_c,
         "warn_c": warn_c,
         "vc_count": len(vc_only),
-        "switch_count": len(evaluated),
+        "switch_count": len(main_evaluated),
+        "ex4000_4100_count": len(ex4k_evaluated),
+        "ex4000_4100_max_temp_c": ex4k_evaluated[0]["peak_temp_c"] if ex4k_evaluated else None,
         "alarmed_vcs_count": len(alarmed_vcs),
         "alarmed_all_count": len(alarmed_all),
         "alarmed_count": len(alarmed_vcs) if vc_only else len(alarmed_all),

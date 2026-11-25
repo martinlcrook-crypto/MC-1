@@ -1845,6 +1845,17 @@
             <span class="pill type-ap">Search</span>
           </button>
         </div>
+
+        <div class="sidebar-group">
+          <div class="sidebar-label">Arcade</div>
+          <button class="nav-tab" data-tab="tab-jack-attack" onclick="switchTab('tab-jack-attack')">
+            <span class="nav-tab-left">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="3"/><line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/><circle cx="15.5" cy="11" r="1"/><circle cx="17.5" cy="13" r="1"/></svg>
+              <span>Jack Attack</span>
+            </span>
+            <span class="pill neutral">C64</span>
+          </button>
+        </div>
       </aside>
 
       <main class="main-content">
@@ -2829,6 +2840,27 @@
             </div>
           </div>
         </div>
+
+        <!-- TAB: JACK ATTACK 64 -->
+        <div id="tab-jack-attack" class="tab-pane">
+          <div class="panel" style="padding:14px;">
+            <div class="panel-header" style="margin-bottom:10px;">
+              <div class="panel-actions">
+                <h2 class="panel-title">Jack Attack 64</h2>
+                <span class="pill neutral">Commodore 64 Tribute</span>
+              </div>
+              <div class="panel-actions">
+                <a href="/jack-attack" target="_blank" rel="noopener" class="filter-btn" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;">Open Fullscreen</a>
+              </div>
+            </div>
+            <iframe
+              id="jackAttackFrame"
+              title="Jack Attack 64"
+              data-src="/jack-attack"
+              allow="autoplay; gamepad; fullscreen"
+              style="width:100%;height:min(78vh,740px);min-height:540px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;background:#0b0c14;display:block;"></iframe>
+          </div>
+        </div>
       </main>
     </div>
   </div>
@@ -3153,6 +3185,20 @@
           if (inp && !lookupState.results) inp.focus();
           if (lookupState.detail) renderClientRssiChart(lookupState.detail);
         }, 40);
+      } else if (tabId === "tab-jack-attack") {
+        const frame = document.getElementById("jackAttackFrame");
+        if (frame) {
+          if (!frame.getAttribute("src")) {
+            frame.setAttribute("src", frame.dataset.src || "/jack-attack");
+          }
+          setTimeout(() => { try { frame.focus(); } catch (e) {} }, 60);
+        }
+      }
+      if (tabId !== "tab-jack-attack") {
+        const frame = document.getElementById("jackAttackFrame");
+        if (frame && document.activeElement === frame) {
+          try { frame.blur(); } catch (e) {}
+        }
       }
     }
     function jumpWallboardTab(tabId) {
@@ -6217,7 +6263,7 @@
     }
 
     document.addEventListener("keydown", ev => {
-      if (!wbActive) return;
+      if (!wbActive || activeTabId === "tab-jack-attack") return;
       if (ev.target && ["INPUT", "TEXTAREA", "SELECT"].includes(ev.target.tagName)) return;
       if (ev.key === "ArrowRight") { ev.preventDefault(); stepWallboardTab(1); }
       else if (ev.key === "ArrowLeft") { ev.preventDefault(); stepWallboardTab(-1); }

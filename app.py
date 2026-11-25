@@ -2361,6 +2361,15 @@ def index():
     return resp
 
 
+@app.get("/jack-attack")
+def jack_attack():
+    if not _is_authenticated():
+        return redirect("/login")
+    resp = send_from_directory(str(BASE_DIR), "jack_attack.html")
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @app.get("/favicon.svg")
 def favicon_svg():
     resp = send_from_directory(str(BASE_DIR), "favicon.svg", mimetype="image/svg+xml")

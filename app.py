@@ -13,7 +13,7 @@ from flask import Flask, jsonify, redirect, request, send_from_directory, sessio
 import requests
 
 from history_store import init_history_db, query_history, record_snapshot
-from nac_rejects import collect_nac_server_rejects, format_mac, normalize_mac
+from nac_rejects import collect_nac_server_rejects, format_mac, mist_device_uuid_from_mac, normalize_mac
 from client_lookup import get_wifi_client_detail, search_wifi_clients
 from traffic_stats import MistRateLimitError, collect_traffic_usage, parse_local_datetime_to_epoch
 
@@ -54,6 +54,10 @@ BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
 
 MIST_API_HOST = os.getenv("MIST_API_HOST", "https://api.eu.mist.com").rstrip("/")
+MIST_UI_HOST = (
+    os.getenv("MIST_UI_HOST", "").strip().rstrip("/")
+    or re.sub(r"^https?://api\.", "https://manage.", MIST_API_HOST)
+)
 MIST_ORG_ID = os.getenv("MIST_ORG_ID", "").strip()
 MIST_API_TOKEN = os.getenv("MIST_API_TOKEN", "").strip()
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "300"))
@@ -627,6 +631,7 @@ def extract_vc_member_issues(sw: Dict[str, Any], site_name: str) -> List[Dict[st
     ) -> None:
         issues.append(
             {
+                "device_id": str(sw.get("id") or mist_device_uuid_from_mac(vc_mac or sw_mac)),
                 "switch_name": sw_name,
                 "site_id": str(sw.get("site_id") or ""),
                 "site_name": site_name,
@@ -850,6 +855,7 @@ def extract_vc_alarm_issues(
         issue_type = "PFE Down" if is_pfe else ("Linecard Offline" if "linecard" in combined or "line card" in combined else "VC Member Down")
         results.append(
             {
+                "device_id": str(a.get("device_id") or sw_info.get("id") or (mist_device_uuid_from_mac(smac) if smac else "")),
                 "switch_name": sw_name,
                 "site_id": sid,
                 "site_name": site_name,
@@ -954,8 +960,12 @@ def _extract_alarm_temp_c(alarm_obj: Dict[str, Any], alarm_text: str) -> Optiona
 def _build_enriched_alarms(
     raw_alarms: List[Dict[str, Any]],
     site_map: Dict[str, Dict[str, Any]],
+    switch_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+    ap_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Normalize Mist org alarms with severity, ack status, and parsed temperature (if thermal)."""
+    """Normalize Mist org alarms with severity, ack status, parsed temperature, and Mist portal link metadata."""
+    sw_map = switch_info_map or {}
+    ap_map = ap_info_map or {}
     enriched: List[Dict[str, Any]] = []
     for a in raw_alarms:
         if not isinstance(a, dict):
@@ -967,19 +977,73 @@ def _build_enriched_alarms(
         sev = _normalize_alarm_severity(a.get("severity"))
         is_temp = _is_temperature_alarm(a_type, a_group, a_text)
         temp_c = _extract_alarm_temp_c(a, a_text) if is_temp else None
-        hostnames = a.get("hostnames")
+
+        hostnames = a.get("hostnames") if isinstance(a.get("hostnames"), list) else []
+        sw_list = a.get("switches") if isinstance(a.get("switches"), list) else []
+        ap_list = a.get("aps") if isinstance(a.get("aps"), list) else []
+        gw_list = a.get("gateways") if isinstance(a.get("gateways"), list) else []
+
+        dev_type = ""
+        dev_mac_raw = ""
+        if sw_list:
+            dev_type = "switch"
+            dev_mac_raw = str(sw_list[0] or "")
+        elif ap_list:
+            dev_type = "ap"
+            dev_mac_raw = str(ap_list[0] or "")
+        elif gw_list:
+            dev_type = "gateway"
+            dev_mac_raw = str(gw_list[0] or "")
+        else:
+            dev_mac_raw = str(a.get("mac") or a.get("device_mac") or "")
+            low_type = f"{a_type} {a_group}".lower()
+            if any(tok in low_type for tok in ("switch", "vc_", "virtual_chassis", "fpc", "pfe")):
+                dev_type = "switch"
+            elif any(tok in low_type for tok in ("ap_", "infra_ap", "wireless")):
+                dev_type = "ap"
+
+        dev_mac_norm = normalize_mac(dev_mac_raw)
+        sw_info = sw_map.get(dev_mac_norm) if dev_mac_norm else None
+        ap_info = ap_map.get(dev_mac_norm) if dev_mac_norm else None
+        if not dev_type:
+            if sw_info:
+                dev_type = "switch"
+            elif ap_info:
+                dev_type = "ap"
+
+        dev_info = sw_info if dev_type == "switch" else (ap_info if dev_type == "ap" else (sw_info or ap_info or {}))
         dev_name = ""
-        if isinstance(hostnames, list) and hostnames:
+        if hostnames:
             dev_name = str(hostnames[0] or "").strip()
-        elif isinstance(a.get("hostname"), str):
+        elif isinstance(a.get("hostname"), str) and a.get("hostname", "").strip():
             dev_name = a.get("hostname", "").strip()
+        elif dev_info and dev_info.get("name"):
+            dev_name = str(dev_info.get("name") or "").strip()
+        elif dev_mac_norm:
+            dev_name = format_mac(dev_mac_norm)
+
+        dev_id = str(
+            a.get("device_id")
+            or (dev_info.get("id") if isinstance(dev_info, dict) else "")
+            or (mist_device_uuid_from_mac(dev_mac_norm) if dev_mac_norm else "")
+        )
+        resolved_sid = sid or (str(dev_info.get("site_id") or "") if isinstance(dev_info, dict) else "")
+        uname = str(a.get("username") or a.get("user") or "").strip()
+        client_mac = format_mac(a.get("client_mac")) if normalize_mac(a.get("client_mac")) else ""
+
         enriched.append(
             {
                 "type": a_type,
                 "severity": sev,
                 "group": a_group,
-                "site_name": a.get("site_name") or site_map.get(sid, {}).get("name", "Org"),
+                "site_id": resolved_sid,
+                "site_name": a.get("site_name") or site_map.get(resolved_sid, {}).get("name", "Org"),
                 "device_name": dev_name,
+                "device_id": dev_id,
+                "device_mac": format_mac(dev_mac_norm) if dev_mac_norm else "",
+                "device_type": dev_type,
+                "username": uname,
+                "client_mac": client_mac,
                 "text": a_text,
                 "count": int(a.get("count") or 1),
                 "acked": bool(a.get("acked") or a.get("ack_admin_id") or a.get("resolved")),
@@ -1302,6 +1366,7 @@ def extract_ap_uplink_info(ap: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "duplex": duplex_label,
                     "rx_errors": int(pstat.get("rx_errors") or 0),
                     "switch_name": switch_name,
+                    "switch_mac": normalize_mac(lldp.get("chassis_id")),
                     "switch_port": switch_port,
                     "switch_port_desc": switch_port_desc if switch_port_desc != switch_port else "",
                     "switch_ip": switch_ip,
@@ -1309,6 +1374,33 @@ def extract_ap_uplink_info(ap: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
 
     return degraded_ports
+
+
+def _resolve_switch_link_meta(
+    switch_name: str,
+    switch_mac_raw: Any,
+    switch_info_map: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, str]:
+    """Resolve (switch_id, switch_mac, switch_site_id) for LLDP switch names/MACs to build Mist Switch links."""
+    sw_map = switch_info_map or {}
+    smac = normalize_mac(switch_mac_raw)
+    info = sw_map.get(smac) if smac else None
+    if info is None and switch_name:
+        target = switch_name.strip().lower()
+        target_short = target.split(".")[0]
+        for cand_mac, cand in sw_map.items():
+            cname = str(cand.get("name") or "").strip().lower()
+            if cname and (cname == target or cname.split(".")[0] == target_short):
+                info = cand
+                smac = cand_mac
+                break
+    sw_id = str((info or {}).get("id") or (mist_device_uuid_from_mac(smac) if smac else ""))
+    sw_site_id = str((info or {}).get("site_id") or "")
+    return {
+        "switch_id": sw_id,
+        "switch_mac": format_mac(smac) if smac else "",
+        "switch_site_id": sw_site_id,
+    }
 
 
 def _get_org_info_cached(session: requests.Session) -> Dict[str, Any]:
@@ -1455,22 +1547,34 @@ def _scan_slow_aps_from_sites(
         except Exception as exc:
             return [], f"AP uplink check failed for {site_name}: {exc}"
 
+        with _meta_cache_lock:
+            cached_sw_map = dict(_switch_info_map_cache[1] or {})
         found: List[Dict[str, Any]] = []
         for ap in aps:
             if str(ap.get("status") or "").lower() != "connected":
                 continue
             ip_stat = ap.get("ip_stat") if isinstance(ap.get("ip_stat"), dict) else {}
             ap_ip = str(ap.get("ip") or ip_stat.get("ip") or "").strip()
+            ap_mac = ap.get("mac", "")
+            ap_id = str(ap.get("id") or mist_device_uuid_from_mac(ap_mac))
             for degraded in extract_ap_uplink_info(ap):
+                sw_link = _resolve_switch_link_meta(
+                    degraded.get("switch_name", ""),
+                    degraded.get("switch_mac", ""),
+                    cached_sw_map,
+                )
                 found.append(
                     {
+                        "id": ap_id,
+                        "site_id": site_id,
                         "name": ap.get("name") or ap.get("mac", "Unnamed AP"),
                         "site_name": site_name,
                         "model": ap.get("model", ""),
-                        "mac": ap.get("mac", ""),
+                        "mac": ap_mac,
                         "ip": ap_ip,
                         "num_clients": int(ap.get("num_clients") or 0),
                         **degraded,
+                        **sw_link,
                     }
                 )
         return found, None
@@ -1598,6 +1702,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         )
 
         site_aps: Dict[str, List[Dict[str, Any]]] = {sid: [] for sid in site_map}
+        ap_info_map: Dict[str, Dict[str, Any]] = {}
         org_aps_have_port_stat = False
         org_aps_report_clients = False
         for ap in raw_org_aps:
@@ -1606,6 +1711,14 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             sid = str(ap.get("site_id") or "")
             if sid in site_aps:
                 site_aps[sid].append(ap)
+            amac = normalize_mac(ap.get("mac"))
+            if amac:
+                ap_info_map[amac] = {
+                    "id": str(ap.get("id") or mist_device_uuid_from_mac(amac)),
+                    "name": str(ap.get("name") or format_mac(amac)),
+                    "site_id": sid,
+                    "model": str(ap.get("model") or ""),
+                }
             if str(ap.get("status") or "").lower() == "connected":
                 if isinstance(ap.get("port_stat"), dict) and ap.get("port_stat"):
                     org_aps_have_port_stat = True
@@ -1666,8 +1779,10 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 ip_stat = sw.get("ip_stat") if isinstance(sw.get("ip_stat"), dict) else {}
                 sw_ip = str(sw.get("ip") or ip_stat.get("ip") or "").strip()
                 smac = normalize_mac(sw.get("mac"))
+                sw_id = str(sw.get("id") or (mist_device_uuid_from_mac(smac) if smac else ""))
                 if smac:
                     switch_info_map[smac] = {
+                        "id": sw_id,
                         "name": str(sw.get("name") or format_mac(smac)),
                         "site_id": sid,
                         "model": str(sw.get("model") or ""),
@@ -1688,6 +1803,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 switches_offline += 1
                 offline_switches.append(
                     {
+                        "id": sw_id,
+                        "site_id": sid,
                         "device_type": "Switch",
                         "name": sw.get("name") or sw.get("mac", "Unnamed Switch"),
                         "site_name": site_name,
@@ -1725,7 +1842,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             )
             raw_alarms = alarms_resp.get("results", []) if isinstance(alarms_resp, dict) else []
             alarm_vc_issues = extract_vc_alarm_issues(raw_alarms, site_map, switch_info_map)
-            alarms_all = _build_enriched_alarms(raw_alarms, site_map)
+            alarms_all = _build_enriched_alarms(raw_alarms, site_map, switch_info_map, ap_info_map)
             alarms, alarms_meta = _filter_alarms_view(alarms_all)
         except MistRateLimitError:
             raise
@@ -1831,6 +1948,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 else:
                     ap_clients = 0
 
+                ap_id = str(ap.get("id") or (mist_device_uuid_from_mac(ap_mac_norm) if ap_mac_norm else ""))
                 if is_online:
                     aps_online += 1
                     site_aps_on += 1
@@ -1838,8 +1956,15 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                     total_ap_reported_clients += ap_clients
                     if org_aps_have_port_stat:
                         for degraded in extract_ap_uplink_info(ap):
+                            sw_link = _resolve_switch_link_meta(
+                                degraded.get("switch_name", ""),
+                                degraded.get("switch_mac", ""),
+                                switch_info_map,
+                            )
                             slow_aps.append(
                                 {
+                                    "id": ap_id,
+                                    "site_id": site_id,
                                     "name": ap_name,
                                     "site_name": site_name,
                                     "model": ap_model,
@@ -1847,6 +1972,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                                     "ip": ap_ip,
                                     "num_clients": ap_clients,
                                     **degraded,
+                                    **sw_link,
                                 }
                             )
                 else:
@@ -1854,6 +1980,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                     site_aps_off += 1
                     offline_aps.append(
                         {
+                            "id": ap_id,
+                            "site_id": site_id,
                             "device_type": "AP",
                             "name": ap_name,
                             "site_name": site_name,
@@ -1868,6 +1996,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
 
                 all_aps_list.append(
                     {
+                        "id": ap_id,
+                        "site_id": site_id,
                         "name": ap_name,
                         "site_name": site_name,
                         "model": ap_model,
@@ -1955,6 +2085,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 "id": MIST_ORG_ID,
                 "name": org_info.get("name", "Mist Organization") if isinstance(org_info, dict) else "Mist Organization",
                 "api_host": MIST_API_HOST,
+                "ui_host": MIST_UI_HOST,
             },
             "summary": {
                 "total_wireless_users": total_wireless_users,
@@ -2660,19 +2791,31 @@ def api_slow_aps_scan():
                     if sid in site_map:
                         active_ids.add(sid)
                     if org_has_port_stat:
+                        with _meta_cache_lock:
+                            cached_sw_map = dict(_switch_info_map_cache[1] or {})
                         site_name = site_map.get(sid, {}).get("name", sid or "Unknown Site")
                         ip_stat = ap.get("ip_stat") if isinstance(ap.get("ip_stat"), dict) else {}
                         ap_ip = str(ap.get("ip") or ip_stat.get("ip") or "").strip()
+                        ap_mac = ap.get("mac", "")
+                        ap_id = str(ap.get("id") or mist_device_uuid_from_mac(ap_mac))
                         for degraded in extract_ap_uplink_info(ap):
+                            sw_link = _resolve_switch_link_meta(
+                                degraded.get("switch_name", ""),
+                                degraded.get("switch_mac", ""),
+                                cached_sw_map,
+                            )
                             slow_aps.append(
                                 {
+                                    "id": ap_id,
+                                    "site_id": sid,
                                     "name": ap.get("name") or ap.get("mac", "Unnamed AP"),
                                     "site_name": site_name,
                                     "model": ap.get("model", ""),
-                                    "mac": ap.get("mac", ""),
+                                    "mac": ap_mac,
                                     "ip": ap_ip,
                                     "num_clients": int(ap.get("num_clients") or 0),
                                     **degraded,
+                                    **sw_link,
                                 }
                             )
                 active_ap_sites = [site_map[sid] for sid in active_ids if sid in site_map]

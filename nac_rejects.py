@@ -11,6 +11,7 @@ from traffic_stats import MistRateLimitError
 MAC_CLEAN_RE = re.compile(r"[^0-9a-fA-F]")
 MAC_IN_TEXT_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b|\b[0-9a-fA-F]{12}\b")
 PORT_IN_TEXT_RE = re.compile(r"\b(?:ge|xe|mge|et|ae)-\d+/\d+/\d+(?:\.\d+)?\b", re.IGNORECASE)
+USER_IN_TEXT_RE = re.compile(r"\b(?:user(?:name)?|identity|dot1x_user)\s*[:=]\s*([^\s,;\"'()]+)", re.IGNORECASE)
 
 
 def normalize_mac(raw: Any) -> str:
@@ -23,6 +24,44 @@ def format_mac(raw: Any) -> str:
     if not norm:
         return str(raw or "").strip()
     return ":".join(norm[i : i + 2] for i in range(0, 12, 2))
+
+
+def mist_device_uuid_from_mac(raw_mac: Any) -> str:
+    norm = normalize_mac(raw_mac)
+    return f"00000000-0000-0000-1000-{norm}" if norm else ""
+
+
+def _extract_username(item: Dict[str, Any], fallback_text: str = "") -> str:
+    """Extract a human/802.1X username from Mist wired client, NAC client, or switch event records."""
+    if isinstance(item, dict):
+        for key in (
+            "username",
+            "last_username",
+            "idp_user",
+            "user",
+            "user_name",
+            "dot1x_user",
+            "auth_user",
+            "nac_user",
+            "identity",
+            "last_identity",
+            "cert_cn",
+            "last_cert_cn",
+        ):
+            val = _first_str(item.get(key))
+            if val:
+                return val
+        dmp = item.get("device_mac_port")
+        if isinstance(dmp, list) and dmp and isinstance(dmp[0], dict):
+            for key in ("username", "user", "identity", "dot1x_user"):
+                val = _first_str(dmp[0].get(key))
+                if val:
+                    return val
+    if fallback_text:
+        m = USER_IN_TEXT_RE.search(fallback_text)
+        if m:
+            return m.group(1).strip()
+    return ""
 
 
 def _mist_search_get(
@@ -225,6 +264,8 @@ def _merge_record(
         "ip",
         "manufacture",
         "username",
+        "switch_id",
+        "switch_site_id",
         "switch_name",
         "site_name",
         "site_id",
@@ -383,6 +424,7 @@ def collect_nac_server_rejects(
             smac = normalize_mac(sw.get("mac"))
             if smac:
                 switches_by_mac[smac] = {
+                    "id": str(sw.get("id") or mist_device_uuid_from_mac(smac)),
                     "name": str(sw.get("name") or format_mac(smac)),
                     "site_id": str(sw.get("site_id") or ""),
                     "model": str(sw.get("model") or ""),
@@ -407,13 +449,20 @@ def collect_nac_server_rejects(
         )
 
     records: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+    username_by_client_mac: Dict[str, str] = {}
 
-    def switch_label(smac: str, site_id: str) -> Tuple[str, str]:
+    def record_username(cmac_norm: str, uname: str) -> str:
+        if cmac_norm and uname and cmac_norm not in username_by_client_mac:
+            username_by_client_mac[cmac_norm] = uname
+        return uname
+
+    def switch_meta(smac: str, site_id: str) -> Tuple[str, str, str, str]:
         sw = switches_by_mac.get(smac) or {}
-        resolved_site_id = site_id or sw.get("site_id") or ""
+        resolved_site_id = site_id or str(sw.get("site_id") or "")
         sname = sites_by_id.get(resolved_site_id) or (resolved_site_id or "Unknown Site")
-        sw_name = sw.get("name") or (format_mac(smac) if smac else "Unknown Switch")
-        return sw_name, sname
+        sw_name = str(sw.get("name") or (format_mac(smac) if smac else "Unknown Switch"))
+        sw_id = str(sw.get("id") or (mist_device_uuid_from_mac(smac) if smac else ""))
+        return sw_name, sname, sw_id, resolved_site_id
 
     # Process Wired Clients matching auth_state=server_reject
     for item in wired_sr_list:
@@ -422,8 +471,9 @@ def collect_nac_server_rejects(
             continue
         smac, port_id, vlan_id, auth_state, auth_method, port_usage = _extract_wired_port_info(item)
         site_id = str(item.get("site_id") or "")
-        sw_name, site_name = switch_label(smac, site_id)
+        sw_name, site_name, sw_id, resolved_site_id = switch_meta(smac, site_id)
         vlan_name = ", ".join(reject_vlan_to_names.get(vlan_id, [])) if vlan_id is not None else ""
+        uname = record_username(cmac, _extract_username(item))
         _merge_record(
             records,
             {
@@ -431,9 +481,11 @@ def collect_nac_server_rejects(
                 "hostname": _first_str(item.get("hostname")) or _first_str(item.get("dhcp_hostname")),
                 "ip": _first_str(item.get("ip")),
                 "manufacture": _first_str(item.get("manufacture")),
-                "username": _first_str(item.get("username")),
-                "site_id": site_id,
+                "username": uname,
+                "site_id": resolved_site_id,
                 "site_name": site_name,
+                "switch_id": sw_id,
+                "switch_site_id": resolved_site_id,
                 "switch_mac": format_mac(smac) if smac else "",
                 "switch_name": sw_name,
                 "port_id": port_id,
@@ -459,9 +511,10 @@ def collect_nac_server_rejects(
         if vlan_id is None or vlan_id not in reject_vlan_to_names:
             continue
         site_id = str(item.get("site_id") or "")
-        sw_name, site_name = switch_label(smac, site_id)
+        sw_name, site_name, sw_id, resolved_site_id = switch_meta(smac, site_id)
         vlan_name = ", ".join(reject_vlan_to_names.get(vlan_id, []))
         is_explicit_sr = _is_reject_auth_state(auth_state)
+        uname = record_username(cmac, _extract_username(item))
         _merge_record(
             records,
             {
@@ -469,9 +522,11 @@ def collect_nac_server_rejects(
                 "hostname": _first_str(item.get("hostname")) or _first_str(item.get("dhcp_hostname")),
                 "ip": _first_str(item.get("ip")),
                 "manufacture": _first_str(item.get("manufacture")),
-                "username": _first_str(item.get("username")),
-                "site_id": site_id,
+                "username": uname,
+                "site_id": resolved_site_id,
                 "site_name": site_name,
+                "switch_id": sw_id,
+                "switch_site_id": resolved_site_id,
                 "switch_mac": format_mac(smac) if smac else "",
                 "switch_name": sw_name,
                 "port_id": port_id,
@@ -496,7 +551,7 @@ def collect_nac_server_rejects(
         smac = normalize_mac(item.get("device_mac") or item.get("last_device_mac") or item.get("ap"))
         port_id = str(item.get("port_id") or item.get("last_port_id") or "").strip()
         site_id = str(item.get("site_id") or "")
-        sw_name, site_name = switch_label(smac, site_id)
+        sw_name, site_name, sw_id, resolved_site_id = switch_meta(smac, site_id)
         vlan_raw = item.get("vlan") if item.get("vlan") is not None else item.get("last_vlan_id")
         try:
             vlan_id = int(str(vlan_raw).strip()) if vlan_raw is not None and str(vlan_raw).strip() else None
@@ -507,6 +562,7 @@ def collect_nac_server_rejects(
         reason = _first_str(item.get("last_status_reason") or item.get("reason"))
         if not reason:
             reason = f"NAC Access Denied{f' ({rule_name})' if rule_name else ''}"
+        uname = record_username(cmac, _extract_username(item))
         _merge_record(
             records,
             {
@@ -514,9 +570,11 @@ def collect_nac_server_rejects(
                 "hostname": _first_str(item.get("hostname")),
                 "ip": _first_str(item.get("ip") or item.get("last_ip")),
                 "manufacture": _first_str(item.get("mfg") or item.get("manufacture")),
-                "username": _first_str(item.get("username") or item.get("last_username")),
-                "site_id": site_id,
+                "username": uname,
+                "site_id": resolved_site_id,
                 "site_name": site_name,
+                "switch_id": sw_id,
+                "switch_site_id": resolved_site_id,
                 "switch_mac": format_mac(smac) if smac else "",
                 "switch_name": sw_name,
                 "port_id": port_id,
@@ -561,7 +619,8 @@ def collect_nac_server_rejects(
             continue
 
         site_id = str(ev.get("site_id") or "")
-        sw_name, site_name = switch_label(smac, site_id)
+        sw_name, site_name, sw_id, resolved_site_id = switch_meta(smac, site_id)
+        uname = record_username(cmac, _extract_username(ev, ev_text))
         _merge_record(
             records,
             {
@@ -569,9 +628,11 @@ def collect_nac_server_rejects(
                 "hostname": _first_str(ev.get("hostname")),
                 "ip": "",
                 "manufacture": "",
-                "username": _first_str(ev.get("username")),
-                "site_id": site_id,
+                "username": uname,
+                "site_id": resolved_site_id,
                 "site_name": site_name,
+                "switch_id": sw_id,
+                "switch_site_id": resolved_site_id,
                 "switch_mac": format_mac(smac) if smac else "",
                 "switch_name": sw_name,
                 "port_id": port_id,
@@ -594,6 +655,13 @@ def collect_nac_server_rejects(
         for k, r in records.items()
         if isinstance(r.get("timestamp"), (int, float)) and float(r["timestamp"]) >= cutoff_ts
     }
+
+    # Cross-enrich username across sources by client MAC (0 extra API calls)
+    for rec in records.values():
+        if not rec.get("username"):
+            cmac_norm = normalize_mac(rec.get("mac"))
+            if cmac_norm and cmac_norm in username_by_client_mac:
+                rec["username"] = username_by_client_mac[cmac_norm]
 
     # Phase 3: Enrich affected switch ports with exact Port Profile (port_usage) via stats/ports/search
     affected_sw_macs = sorted(

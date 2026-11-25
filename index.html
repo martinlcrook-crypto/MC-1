@@ -840,6 +840,36 @@
     }
 
     /* Hover-Copy MAC / IP Chips */
+    /* Mist Org Deep-Link Anchors */
+    a.mist-link {
+      color: inherit;
+      text-decoration: none;
+      border-bottom: 1px dashed rgba(56, 189, 248, 0.38);
+      transition: color var(--t-fast), border-color var(--t-fast);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    a.mist-link:hover {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      border-bottom-style: solid;
+    }
+
+    a.mist-link .ext-ico {
+      width: 11px;
+      height: 11px;
+      opacity: 0.45;
+      flex-shrink: 0;
+      transition: opacity var(--t-fast), transform var(--t-fast);
+    }
+
+    a.mist-link:hover .ext-ico {
+      opacity: 1;
+      transform: translate(1px, -1px);
+    }
+
     .copy-chip {
       display: inline-flex;
       align-items: center;
@@ -2645,6 +2675,7 @@
                 <thead>
                   <tr>
                     <th>Device / MAC &amp; IP</th>
+                    <th>Username</th>
                     <th>Site</th>
                     <th>Switch &amp; Port</th>
                     <th>Port Profile</th>
@@ -2978,6 +3009,84 @@
       if (!s || s === "--") return '<span class="meta-text">--</span>';
       const title = label ? `Click to copy ${label}: ${s}` : `Click to copy ${s}`;
       return `<span class="copy-chip" title="${escapeHtml(title)}" onclick="copyValue('${escapeAttr(s)}', '${escapeAttr(label)}', this, event)"><span>${escapeHtml(s)}</span><svg class="copy-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span>`;
+    }
+
+    /* Juniper Mist Admin Portal Deep-Link Helpers */
+    function getMistOrgContext() {
+      const orgId = String(latestData?.org?.id || "").trim();
+      let uiHost = String(latestData?.org?.ui_host || "").trim().replace(/\/+$/, "");
+      if (!uiHost) {
+        const apiHost = String(latestData?.org?.api_host || "https://api.eu.mist.com").trim().replace(/\/+$/, "");
+        uiHost = apiHost.replace(/^https?:\/\/api\./i, "https://manage.");
+      }
+      return { orgId, uiHost };
+    }
+    function normMacHex(raw) {
+      const cleaned = String(raw || "").replace(/[^0-9a-fA-F]/g, "").toLowerCase();
+      return cleaned.length === 12 ? cleaned : "";
+    }
+    function mistDeviceUuid(id, mac) {
+      const s = String(id || "").trim();
+      if (s && /^[0-9a-f-]{32,36}$/i.test(s)) return s;
+      const m = normMacHex(mac);
+      return m ? `00000000-0000-0000-1000-${m}` : "";
+    }
+    function mistPortalBase() {
+      const { orgId, uiHost } = getMistOrgContext();
+      if (!orgId || !uiHost) return "";
+      return `${uiHost}/admin/?org_id=${encodeURIComponent(orgId)}`;
+    }
+    function mistSiteUrl(siteId) {
+      const base = mistPortalBase();
+      const sid = String(siteId || "").trim();
+      if (!base || !sid) return "";
+      return `${base}#!dashboard/insights/site/${encodeURIComponent(sid)}`;
+    }
+    function mistApUrl(siteId, apId, apMac) {
+      const base = mistPortalBase();
+      const sid = String(siteId || "").trim();
+      if (!base || !sid) return "";
+      const devId = mistDeviceUuid(apId, apMac);
+      return devId
+        ? `${base}#!ap/detail/${encodeURIComponent(devId)}/${encodeURIComponent(sid)}`
+        : `${base}#!ap/${encodeURIComponent(sid)}`;
+    }
+    function mistSwitchUrl(siteId, swId, swMac) {
+      const base = mistPortalBase();
+      const sid = String(siteId || "").trim();
+      if (!base || !sid) return "";
+      const devId = mistDeviceUuid(swId, swMac);
+      return devId
+        ? `${base}#!switch/detail/${encodeURIComponent(devId)}/${encodeURIComponent(sid)}`
+        : `${base}#!switch/${encodeURIComponent(sid)}`;
+    }
+    function mistWiredClientUrl(siteId, clientMac) {
+      const base = mistPortalBase();
+      const sid = String(siteId || "").trim();
+      if (!base || !sid) return "";
+      const m = normMacHex(clientMac);
+      return m
+        ? `${base}#!dashboard/insights/wiredClient/${encodeURIComponent(m)}/today/${encodeURIComponent(sid)}`
+        : `${base}#!clients/wired/${encodeURIComponent(sid)}`;
+    }
+    function mistNacClientUrl(siteId, clientMac) {
+      const base = mistPortalBase();
+      const sid = String(siteId || "").trim();
+      if (!base) return "";
+      const m = normMacHex(clientMac);
+      if (m && sid) return `${base}#!dashboard/insights/nacClient/${encodeURIComponent(m)}/today/${encodeURIComponent(sid)}`;
+      if (sid) return `${base}#!nacClients/${encodeURIComponent(sid)}`;
+      return `${base}#!nacClients/org`;
+    }
+    function mistAlarmsUrl(siteId) {
+      const base = mistPortalBase();
+      if (!base) return "";
+      const sid = String(siteId || "").trim();
+      return sid ? `${base}#!alerts/${encodeURIComponent(sid)}` : `${base}#!alerts/org`;
+    }
+    function renderMistLink(labelHtml, url, title = "Open in Juniper Mist") {
+      if (!url) return labelHtml;
+      return `<a class="mist-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(title)}" onclick="event.stopPropagation()"><span>${labelHtml}</span><svg class="ext-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></a>`;
     }
 
     /* Smooth KPI Count-Up Animation */
@@ -3430,10 +3539,16 @@
         if (d.mac) metaChips.push(renderCopyable(d.mac, "MAC"));
         const verMeta = d.version ? `<span class="sub-cell">${escapeHtml(d.version)}</span>` : "";
         const seen = fmtLastSeen(d.last_seen);
+        const devUrl = dtype === "Switch"
+          ? mistSwitchUrl(d.site_id, d.id, d.mac)
+          : mistApUrl(d.site_id, d.id, d.mac);
+        const siteUrl = mistSiteUrl(d.site_id);
+        const devLink = renderMistLink(`<strong>${escapeHtml(d.name)}</strong>`, devUrl, `Open ${dtype} ${d.name} in Juniper Mist`);
+        const siteLink = renderMistLink(escapeHtml(d.site_name), siteUrl, `Open site ${d.site_name} in Juniper Mist`);
         return `<tr>
           <td><span class="pill ${typeCls}">${escapeHtml(dtype)}</span></td>
-          <td><strong>${escapeHtml(d.name)}</strong>${metaChips.length ? `<span class="sub-cell">${metaChips.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
-          <td>${escapeHtml(d.site_name)}</td>
+          <td>${devLink}${metaChips.length ? `<span class="sub-cell">${metaChips.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
+          <td>${siteLink}</td>
           <td>${escapeHtml(d.model || "--")}${verMeta}</td>
           <td><span class="pill bad">${escapeHtml(d.status || "disconnected")}</span></td>
           <td>${escapeHtml(seen.label)}${seen.rel ? `<span class="sub-cell">${escapeHtml(seen.rel)}</span>` : ""}</td>
@@ -3520,10 +3635,14 @@
         const modelParts = [it.model, it.serial ? `S/N ${it.serial}` : ""].filter(Boolean).join(" · ");
         const seen = fmtLastSeen(it.timestamp);
         const srcCls = /alarm/i.test(it.source || "") ? "warn" : "type-switch";
+        const swUrl = mistSwitchUrl(it.site_id, it.device_id, it.mac);
+        const siteUrl = mistSiteUrl(it.site_id);
+        const swLink = renderMistLink(`<strong>${escapeHtml(it.switch_name || "Unknown Switch")}</strong>`, swUrl, `Open ${it.switch_name || "switch"} in Juniper Mist`);
+        const siteLink = renderMistLink(escapeHtml(it.site_name || "--"), siteUrl, `Open site ${it.site_name || ""} in Juniper Mist`);
         return `<tr class="thermal-alarm-row">
           <td style="white-space:nowrap;"><span class="pill ${typePillCls}">${escapeHtml(itype)}</span></td>
-          <td><strong>${escapeHtml(it.switch_name || "Unknown Switch")}</strong>${metaChips.length ? `<span class="sub-cell">${metaChips.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}${modelParts ? `<span class="sub-cell">${escapeHtml(modelParts)}</span>` : ""}</td>
-          <td>${escapeHtml(it.site_name || "--")}</td>
+          <td>${swLink}${metaChips.length ? `<span class="sub-cell">${metaChips.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}${modelParts ? `<span class="sub-cell">${escapeHtml(modelParts)}</span>` : ""}</td>
+          <td>${siteLink}</td>
           <td style="white-space:nowrap;"><strong style="font-family:var(--font-mono);color:#fff;">${escapeHtml(it.member_label || "VC Member")}</strong></td>
           <td style="white-space:normal;max-width:260px;"><span class="pill bad">${escapeHtml(it.state || "down")}</span>${it.details ? `<span class="sub-cell">${escapeHtml(it.details)}</span>` : ""}</td>
           <td style="white-space:nowrap;"><span class="pill ${srcCls}">${escapeHtml(it.source || "Switch Telemetry")}</span>${seen.label && seen.label !== "--" ? `<span class="sub-cell">${escapeHtml(seen.rel || seen.label)}</span>` : ""}</td>
@@ -3780,12 +3899,20 @@
         if (ap.mac) metaParts.push(renderCopyable(ap.mac, "AP MAC"));
         const swMeta = ap.switch_ip ? `<span class="sub-cell">${renderCopyable(ap.switch_ip, "Switch IP")}</span>` : "";
         const portDesc = ap.switch_port_desc ? `<span class="sub-cell">${escapeHtml(ap.switch_port_desc)}</span>` : "";
+        const apUrl = mistApUrl(ap.site_id, ap.id, ap.mac);
+        const siteUrl = mistSiteUrl(ap.site_id);
+        const swUrl = (ap.switch_id || ap.switch_mac)
+          ? mistSwitchUrl(ap.switch_site_id || ap.site_id, ap.switch_id, ap.switch_mac)
+          : "";
+        const apLink = renderMistLink(`<strong>${escapeHtml(ap.name)}</strong>`, apUrl, `Open AP ${ap.name} in Juniper Mist`);
+        const siteLink = renderMistLink(escapeHtml(ap.site_name), siteUrl, `Open site ${ap.site_name} in Juniper Mist`);
+        const swLink = renderMistLink(`<strong>${escapeHtml(ap.switch_name || "Unknown Switch")}</strong>`, swUrl, `Open switch ${ap.switch_name || ""} in Juniper Mist`);
         return `<tr>
-          <td><strong>${escapeHtml(ap.name)}</strong>${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
-          <td>${escapeHtml(ap.site_name)}</td>
+          <td>${apLink}${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
+          <td>${siteLink}</td>
           <td><code>${escapeHtml(ap.ap_port || "eth0")}</code></td>
           <td><span class="pill ${pillCls}">${escapeHtml(ap.speed_label || (ap.speed + " Mbps"))} · ${escapeHtml(ap.duplex || "Auto")} Duplex</span></td>
-          <td><strong>${escapeHtml(ap.switch_name || "Unknown Switch")}</strong>${swMeta}</td>
+          <td>${swLink}${swMeta}</td>
           <td><code>${escapeHtml(ap.switch_port || "Unknown Port")}</code>${portDesc}</td>
           <td class="num"><strong>${fmtNum(ap.num_clients)}</strong></td>
         </tr>`;
@@ -4188,10 +4315,14 @@
             const hwNote = (vc.fans_bad > 0 || vc.psus_bad > 0)
               ? ` · <strong style="color:var(--red);">${vc.fans_bad > 0 ? vc.fans_bad + " fan fault" : ""}${vc.fans_bad > 0 && vc.psus_bad > 0 ? ", " : ""}${vc.psus_bad > 0 ? vc.psus_bad + " PSU fault" : ""}</strong>`
               : "";
+            const vcUrl = mistSwitchUrl(vc.site_id, vc.id, vc.vc_mac || vc.mac);
+            const siteUrl = mistSiteUrl(vc.site_id);
+            const vcLink = renderMistLink(escapeHtml(vc.name), vcUrl, `Open ${vc.name} in Juniper Mist`);
+            const siteLink = renderMistLink(escapeHtml(vc.site_name), siteUrl, `Open site ${vc.site_name} in Juniper Mist`);
             return `<div class="vc-alarm-card">
               <div style="min-width:0;">
-                <div style="font-weight:700;color:#fff;font-size:0.9rem;">${escapeHtml(vc.name)} <span class="pill type-switch" style="margin-left:4px;">${vc.is_vc ? `${vc.member_count}-member VC` : "Switch"}</span></div>
-                <div class="sub-cell" style="color:#fecaca;">${escapeHtml(vc.site_name)} · ${escapeHtml(vc.hottest_member)} (${escapeHtml(vc.hottest_sensor)})${hwNote}</div>
+                <div style="font-weight:700;color:#fff;font-size:0.9rem;">${vcLink} <span class="pill type-switch" style="margin-left:4px;">${vc.is_vc ? `${vc.member_count}-member VC` : "Switch"}</span></div>
+                <div class="sub-cell" style="color:#fecaca;">${siteLink} · ${escapeHtml(vc.hottest_member)} (${escapeHtml(vc.hottest_sensor)})${hwNote}</div>
               </div>
               <div style="text-align:right;flex-shrink:0;">
                 <div style="font-family:var(--font-mono);font-size:1.25rem;font-weight:800;color:var(--red);">${escapeHtml(vc.peak_temp_c)}°C</div>
@@ -4299,10 +4430,15 @@
           ? `<span class="pill warn">Warm (&ge; ${warnC}°C)</span>`
           : `<span class="pill ok">Normal</span>`;
 
+        const swUrl = mistSwitchUrl(vc.site_id, vc.id, vc.vc_mac || vc.mac);
+        const siteUrl = mistSiteUrl(vc.site_id);
+        const swLink = renderMistLink(`<strong>${escapeHtml(vc.name)}</strong>`, swUrl, `Open ${vc.name} in Juniper Mist`);
+        const siteLink = renderMistLink(escapeHtml(vc.site_name), siteUrl, `Open site ${vc.site_name} in Juniper Mist`);
+
         return `<tr class="${isAlarm ? "thermal-alarm-row" : ""}">
           <td><span class="rank-badge ${rankCls}">#${rank}</span></td>
-          <td><strong>${escapeHtml(vc.name)}</strong>${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
-          <td>${escapeHtml(vc.site_name)}</td>
+          <td>${swLink}${metaParts.length ? `<span class="sub-cell">${metaParts.join('<span class="copy-inline-sep">·</span>')}</span>` : ""}</td>
+          <td>${siteLink}</td>
           <td>
             <div class="temp-cell">
               <div class="temp-val-row">
@@ -4734,12 +4870,28 @@
         const tempPill = a.is_temp_alarm && typeof a.temp_c === "number"
           ? `<span class="pill ${a.temp_c >= thresholdC ? "bad" : "neutral"}">${escapeHtml(a.temp_c)}°C</span>`
           : "";
-        const devLabel = a.device_name ? ` · ${escapeHtml(a.device_name)}` : "";
+        const siteUrl = a.site_id ? mistSiteUrl(a.site_id) : mistAlarmsUrl("");
+        const siteLink = renderMistLink(escapeHtml(a.site_name || "Org"), siteUrl, a.site_id ? `Open site ${a.site_name} in Juniper Mist` : "Open Org Alerts in Juniper Mist");
+        const alarmUrl = mistAlarmsUrl(a.site_id);
+        const typeLink = renderMistLink(escapeHtml(a.type), alarmUrl, "Open Alerts in Juniper Mist");
+
+        let devHtml = "";
+        if (a.device_name) {
+          const devUrl = a.device_type === "ap"
+            ? mistApUrl(a.site_id, a.device_id, a.device_mac)
+            : (a.device_type === "switch" ? mistSwitchUrl(a.site_id, a.device_id, a.device_mac) : "");
+          devHtml = ` · ${renderMistLink(escapeHtml(a.device_name), devUrl, `Open ${a.device_name} in Juniper Mist`)}`;
+        }
+        let userHtml = "";
+        if (a.username) {
+          const userUrl = mistNacClientUrl(a.site_id, a.client_mac);
+          userHtml = ` · ${renderMistLink(escapeHtml(a.username), userUrl, `Open user ${a.username} in Juniper Mist`)}`;
+        }
         const ackPill = a.acked ? `<span class="pill neutral">acked</span>` : "";
         const countPill = a.count > 1 ? `<span class="pill neutral">&times;${fmtNum(a.count)}</span>` : "";
         return `<div class="alarm-item">
           <div class="alarm-top">
-            <strong>${escapeHtml(a.site_name)} — ${escapeHtml(a.type)}${devLabel}</strong>
+            <strong>${siteLink} — ${typeLink}${devHtml}${userHtml}</strong>
             <div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
               ${tempPill}${countPill}${ackPill}<span class="pill ${cls}">${escapeHtml(sev)}</span>
             </div>
@@ -5709,38 +5861,52 @@
         const msg = allDevices.length === 0
           ? "No devices with Server Reject found in the last 24 hours."
           : "No rejected devices match the current filter.";
-        tbody.innerHTML = `<tr><td colspan="7" class="empty" style="${allDevices.length === 0 ? "color:var(--green);" : ""}">${msg}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="empty" style="${allDevices.length === 0 ? "color:var(--green);" : ""}">${msg}</td></tr>`;
         return;
       }
 
       tbody.innerHTML = filtered.map(d => {
         const macChip = d.mac ? renderCopyable(d.mac, "MAC") : "";
+        const clientUrl = mistWiredClientUrl(d.site_id, d.mac);
+        const nacUserUrl = mistNacClientUrl(d.site_id, d.mac);
+        const siteUrl = mistSiteUrl(d.site_id);
+        const swUrl = (d.switch_id || d.switch_mac)
+          ? mistSwitchUrl(d.switch_site_id || d.site_id, d.switch_id, d.switch_mac)
+          : "";
+
         const primaryDevice = d.hostname
-          ? `<strong>${escapeHtml(d.hostname)}</strong>${macChip ? `<span class="sub-cell">${macChip}</span>` : ""}`
-          : macChip;
+          ? `${renderMistLink(`<strong>${escapeHtml(d.hostname)}</strong>`, clientUrl, `Open wired client ${d.hostname} in Juniper Mist`)}${macChip ? `<span class="sub-cell">${macChip}</span>` : ""}`
+          : `${renderMistLink(`<strong>${escapeHtml(d.mac || "Wired Client")}</strong>`, clientUrl, `Open wired client ${d.mac || ""} in Juniper Mist`)}${macChip ? `<span class="sub-cell">${macChip}</span>` : ""}`;
         const subParts = [];
         if (d.manufacture) subParts.push(escapeHtml(d.manufacture));
         if (d.ip) subParts.push(renderCopyable(d.ip, "IP"));
         const deviceCell = subParts.length ? `${primaryDevice}<span class="sub-cell">${subParts.join('<span class="copy-inline-sep">·</span>')}</span>` : primaryDevice;
 
+        const userCell = d.username
+          ? `${renderMistLink(`<strong style="font-family:var(--font-mono);font-size:0.82rem;">${escapeHtml(d.username)}</strong>`, nacUserUrl, `Open NAC client insights for ${d.username} in Juniper Mist`)}${d.auth_method ? `<span class="sub-cell">${escapeHtml(d.auth_method)}</span>` : ""}`
+          : `<span class="meta-text">--</span>${d.auth_method ? `<span class="sub-cell">${escapeHtml(d.auth_method)}</span>` : ""}`;
+
+        const siteLink = renderMistLink(escapeHtml(d.site_name || "Unknown Site"), siteUrl, `Open site ${d.site_name || ""} in Juniper Mist`);
+
         const portSub = d.port_id
           ? `<span class="sub-cell"><code>${escapeHtml(d.port_id)}</code>${d.port_up === true ? " · up" : (d.port_up === false ? " · down" : "")}</span>`
           : "";
-        const switchCell = `<strong>${escapeHtml(d.switch_name || "Unknown Switch")}</strong>${portSub}`;
+        const switchCell = `${renderMistLink(`<strong>${escapeHtml(d.switch_name || "Unknown Switch")}</strong>`, swUrl, `Open switch ${d.switch_name || ""} in Juniper Mist`)}${portSub}`;
         const profileCell = d.port_usage ? `<span class="pill type-switch">${escapeHtml(d.port_usage)}</span>` : `<span class="meta-text">--</span>`;
         const vlanCell = d.vlan !== null && d.vlan !== undefined
           ? `<strong>VLAN ${escapeHtml(d.vlan)}</strong>${d.vlan_name ? `<span class="sub-cell">${escapeHtml(d.vlan_name)}</span>` : ""}`
           : `<span class="meta-text">--</span>`;
         const rType = d.reject_type || "Server Reject";
         const pillCls = rType === "Server Reject VLAN" ? "warn" : "bad";
-        const detailParts = [d.auth_method, d.username, d.nacrule_name, d.reason].filter(Boolean);
+        const detailParts = [d.nacrule_name, d.reason].filter(Boolean);
         const statusCell = `<span class="pill ${pillCls}">${escapeHtml(rType)}</span>${detailParts.length ? `<span class="sub-cell">${escapeHtml(detailParts.join(" · "))}</span>` : ""}`;
         const ls = fmtLastSeen(d.timestamp);
         const lastSeenCell = ls.rel ? `${escapeHtml(ls.rel)}<span class="sub-cell">${escapeHtml(ls.label)}</span>` : escapeHtml(ls.label);
 
         return `<tr>
           <td>${deviceCell}</td>
-          <td>${escapeHtml(d.site_name || "Unknown Site")}</td>
+          <td>${userCell}</td>
+          <td>${siteLink}</td>
           <td>${switchCell}</td>
           <td>${profileCell}</td>
           <td>${vlanCell}</td>

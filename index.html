@@ -2498,9 +2498,29 @@
               <div class="panel-actions">
                 <h2 class="panel-title">Recent Org Alarms (Last 24h)</h2>
                 <span id="alarmsBadge" class="pill neutral">0 Alarms</span>
+                <span id="alarmsSuppressedBadge" class="pill neutral" style="display:none;">0 hidden</span>
+              </div>
+              <div class="panel-actions">
+                <div class="filter-group" title="Filter alarms by minimum severity">
+                  <button class="filter-btn active" data-alarm-sev="warn" onclick="setAlarmSeverityFilter('warn')">Crit &amp; Warn</button>
+                  <button class="filter-btn" data-alarm-sev="critical" onclick="setAlarmSeverityFilter('critical')">Critical Only</button>
+                  <button class="filter-btn" data-alarm-sev="all" onclick="setAlarmSeverityFilter('all')">All</button>
+                </div>
+                <div class="threshold-control" title="Suppress noisy temperature alarms below this threshold (shared with Hottest VCs)">
+                  <label for="alarmTempThresholdInput">Temp &ge;</label>
+                  <input id="alarmTempThresholdInput" class="threshold-input" type="number" min="25" max="95" step="1" value="60" onkeydown="if(event.key==='Enter'){applyVcTempThreshold('alarmTempThresholdInput');}" />
+                  <span>&deg;C</span>
+                  <button id="alarmTempThresholdSaveBtn" type="button" class="btn-secondary" style="padding:4px 9px;font-size:0.74rem;" onclick="applyVcTempThreshold('alarmTempThresholdInput')">Apply</button>
+                </div>
+                <button id="alarmLowTempToggleBtn" type="button" class="btn-secondary active" style="padding:6px 10px;font-size:0.78rem;" onclick="toggleAlarmLowTempFilter()" title="Toggle hiding temperature alerts below the configured threshold">Hide Low-Temp: On</button>
+                <input id="alarmsSearchFilter" class="search" type="search" placeholder="Filter site, device, type, text..." oninput="renderAlarmsSection()" />
               </div>
             </div>
             <div id="alarmsList" class="alarm-list"></div>
+            <div class="hist-footer">
+              <span id="alarmsFilterSummary">Default filter hides info-level chatter, acknowledged alarms, and temperature warnings below threshold.</span>
+              <span id="alarmsCountSummary">--</span>
+            </div>
           </div>
         </div>
 
@@ -2820,6 +2840,7 @@
     let pollingState = { paused: false, paused_at: null, paused_by: null, toggling: false };
     let slowApState = { scanning: false };
     let vcTempState = { scanning: false, scope: "vc", autoScoped: false };
+    let alarmsState = { minSeverity: "warn", hideLowTemp: true };
     let histState = { range: "day", anchor: null, ssid: "all", chartMode: "auto", drillStack: [], data: null };
     let trafficState = { days: 5, siteId: "all", view: "volume", start: null, end: null, isCustom: false, data: null, loading: false };
     let nacState = { duration: "24h", profile: "all", data: null, loading: false, fetchedAtMs: 0 };
@@ -4245,15 +4266,17 @@
       }
     }
 
-    async function applyVcTempThreshold() {
-      const inp = document.getElementById("vcThresholdInput");
-      const btn = document.getElementById("vcThresholdSaveBtn");
+    async function applyVcTempThreshold(sourceInputId = "vcThresholdInput") {
+      const inp = document.getElementById(sourceInputId) || document.getElementById("vcThresholdInput");
+      const btn1 = document.getElementById("vcThresholdSaveBtn");
+      const btn2 = document.getElementById("alarmTempThresholdSaveBtn");
       const raw = parseFloat(inp?.value || "");
       if (!Number.isFinite(raw) || raw < 25 || raw > 95) {
         showToast("Invalid threshold", "Enter a value between 25°C and 95°C", "warn");
         return;
       }
-      if (btn) btn.disabled = true;
+      if (btn1) btn1.disabled = true;
+      if (btn2) btn2.disabled = true;
       try {
         const res = await fetch("/api/vc-temps/threshold", {
           method: "POST",
@@ -4267,17 +4290,21 @@
         if (!latestData) latestData = {};
         if (Array.isArray(data.vc_temps)) latestData.vc_temps = data.vc_temps;
         if (data.vc_temps_meta) latestData.vc_temps_meta = data.vc_temps_meta;
+        if (Array.isArray(data.alarms)) latestData.alarms = data.alarms;
+        if (data.alarms_meta) latestData.alarms_meta = data.alarms_meta;
         renderVcTempsSection();
+        renderAlarmsSection();
         const alarmCnt = data.vc_temps_meta?.alarmed_count || 0;
         showToast(
-          `Alarm threshold set to ${data.threshold_c}°C`,
-          alarmCnt > 0 ? `${alarmCnt} VC${alarmCnt === 1 ? "" : "s"} currently above threshold` : "0 alarms active",
+          `Temp threshold set to ${data.threshold_c}°C`,
+          alarmCnt > 0 ? `${alarmCnt} VC${alarmCnt === 1 ? "" : "s"} above threshold · Recent Alarms updated` : "0 VC thermal alarms · Recent Alarms updated",
           alarmCnt > 0 ? "warn" : "ok"
         );
       } catch (err) {
         showToast("Threshold update failed", err.message, "warn");
       } finally {
-        if (btn) btn.disabled = false;
+        if (btn1) btn1.disabled = false;
+        if (btn2) btn2.disabled = false;
       }
     }
 
@@ -4388,6 +4415,155 @@
       sel.value = [...sel.options].some(o => o.value === curVal) ? curVal : "all";
     }
 
+    /* Recent Alarms Filtering & Rendering (0 extra API calls) */
+    function setAlarmSeverityFilter(mode) {
+      alarmsState.minSeverity = mode || "warn";
+      document.querySelectorAll("[data-alarm-sev]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.alarmSev === alarmsState.minSeverity)
+      );
+      renderAlarmsSection();
+    }
+
+    function toggleAlarmLowTempFilter() {
+      alarmsState.hideLowTemp = !alarmsState.hideLowTemp;
+      renderAlarmsSection();
+    }
+
+    function renderAlarmsSection() {
+      const listEl = document.getElementById("alarmsList");
+      const badgeEl = document.getElementById("alarmsBadge");
+      const suppEl = document.getElementById("alarmsSuppressedBadge");
+      const navBadge = document.getElementById("navAlarmsCount");
+      const toggleBtn = document.getElementById("alarmLowTempToggleBtn");
+      const threshInp = document.getElementById("alarmTempThresholdInput");
+      const summaryLeft = document.getElementById("alarmsFilterSummary");
+      const summaryRight = document.getElementById("alarmsCountSummary");
+      if (!latestData) return;
+
+      const meta = latestData.alarms_meta || {};
+      const thresholdC = typeof meta.temp_threshold_c === "number"
+        ? meta.temp_threshold_c
+        : (typeof latestData.vc_temps_meta?.threshold_c === "number" ? latestData.vc_temps_meta.threshold_c : 60);
+
+      if (threshInp && document.activeElement !== threshInp) {
+        threshInp.value = String(thresholdC);
+      }
+      if (toggleBtn) {
+        toggleBtn.classList.toggle("active", alarmsState.hideLowTemp);
+        toggleBtn.textContent = alarmsState.hideLowTemp
+          ? `Hide Temp < ${thresholdC}°C: On`
+          : `Hide Temp < ${thresholdC}°C: Off`;
+      }
+      document.querySelectorAll("[data-alarm-sev]").forEach(btn =>
+        btn.classList.toggle("active", btn.dataset.alarmSev === alarmsState.minSeverity)
+      );
+
+      const rawAll = Array.isArray(latestData.alarms_all)
+        ? latestData.alarms_all
+        : (Array.isArray(latestData.alarms) ? latestData.alarms : []);
+      const q = (document.getElementById("alarmsSearchFilter")?.value || "").trim().toLowerCase();
+      const sevRank = { critical: 2, warn: 1, warning: 1, info: 0 };
+      const minRank = alarmsState.minSeverity === "critical" ? 2 : (alarmsState.minSeverity === "warn" ? 1 : 0);
+
+      let hiddenLowSev = 0;
+      let hiddenLowTemp = 0;
+      let hiddenAcked = 0;
+      const visible = [];
+
+      for (const a of rawAll) {
+        if (a.acked && alarmsState.minSeverity !== "all") {
+          hiddenAcked += 1;
+          continue;
+        }
+        const sev = String(a.severity || "info").toLowerCase();
+        const rank = sevRank[sev] ?? 0;
+        if (rank < minRank) {
+          hiddenLowSev += 1;
+          continue;
+        }
+        if (alarmsState.hideLowTemp && a.is_temp_alarm && typeof a.temp_c === "number" && a.temp_c < thresholdC) {
+          hiddenLowTemp += 1;
+          continue;
+        }
+        if (q) {
+          const hay = `${a.site_name || ""} ${a.device_name || ""} ${a.type || ""} ${a.text || ""} ${sev}`.toLowerCase();
+          if (!hay.includes(q)) continue;
+        }
+        visible.push(a);
+      }
+
+      const hiddenTotal = hiddenLowSev + hiddenLowTemp + hiddenAcked;
+      const critCount = visible.filter(a => String(a.severity || "").toLowerCase() === "critical").length;
+
+      // Sidebar badge tracks actionable (filtered) alarms
+      if (navBadge) {
+        navBadge.textContent = fmtNum(visible.length);
+        navBadge.className = `pill ${critCount > 0 ? "bad" : (visible.length > 0 ? "warn" : "ok")}`;
+        navBadge.title = hiddenTotal > 0
+          ? `${visible.length} shown · ${hiddenTotal} noisy/low-severity alerts hidden`
+          : `${visible.length} recent alarms`;
+      }
+
+      if (badgeEl) {
+        badgeEl.textContent = `${fmtNum(visible.length)} Alarm${visible.length === 1 ? "" : "s"}`;
+        badgeEl.className = `pill ${critCount > 0 ? "bad" : (visible.length > 0 ? "warn" : "ok")}`;
+      }
+      if (suppEl) {
+        if (hiddenTotal > 0) {
+          const parts = [];
+          if (hiddenLowSev > 0) parts.push(`${hiddenLowSev} low-sev`);
+          if (hiddenLowTemp > 0) parts.push(`${hiddenLowTemp} temp < ${thresholdC}°C`);
+          if (hiddenAcked > 0) parts.push(`${hiddenAcked} acked`);
+          suppEl.textContent = `${fmtNum(hiddenTotal)} hidden (${parts.join(" · ")})`;
+          suppEl.style.display = "inline-flex";
+        } else {
+          suppEl.style.display = "none";
+        }
+      }
+
+      if (summaryLeft) {
+        const sevLabel = alarmsState.minSeverity === "critical"
+          ? "Critical only"
+          : (alarmsState.minSeverity === "warn" ? "Critical & Warning (hiding info chatter)" : "All severities");
+        const tempLabel = alarmsState.hideLowTemp
+          ? `hiding temp alerts < ${thresholdC}°C`
+          : "showing all temp alerts";
+        summaryLeft.textContent = `Filter: ${sevLabel} · ${tempLabel}`;
+      }
+      if (summaryRight) {
+        summaryRight.textContent = `Showing ${fmtNum(visible.length)} of ${fmtNum(rawAll.length)} raw alarms (last 24h)`;
+      }
+
+      if (!listEl) return;
+      if (!visible.length) {
+        listEl.innerHTML = hiddenTotal > 0
+          ? `<div class="empty" style="color:var(--green);">No actionable alarms match the current filter (${fmtNum(hiddenTotal)} noisy/low-severity alert${hiddenTotal === 1 ? "" : "s"} suppressed).</div>`
+          : '<div class="empty" style="color:var(--green);">No alarms in the last 24 hours.</div>';
+        return;
+      }
+
+      listEl.innerHTML = visible.map(a => {
+        const sev = String(a.severity || "info").toLowerCase();
+        const cls = sev === "critical" ? "bad" : (sev === "warn" || sev === "warning" ? "warn" : "neutral");
+        const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleString() : "";
+        const tempPill = a.is_temp_alarm && typeof a.temp_c === "number"
+          ? `<span class="pill ${a.temp_c >= thresholdC ? "bad" : "neutral"}">${escapeHtml(a.temp_c)}°C</span>`
+          : "";
+        const devLabel = a.device_name ? ` · ${escapeHtml(a.device_name)}` : "";
+        const ackPill = a.acked ? `<span class="pill neutral">acked</span>` : "";
+        const countPill = a.count > 1 ? `<span class="pill neutral">&times;${fmtNum(a.count)}</span>` : "";
+        return `<div class="alarm-item">
+          <div class="alarm-top">
+            <strong>${escapeHtml(a.site_name)} — ${escapeHtml(a.type)}${devLabel}</strong>
+            <div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              ${tempPill}${countPill}${ackPill}<span class="pill ${cls}">${escapeHtml(sev)}</span>
+            </div>
+          </div>
+          <div class="meta-text">${escapeHtml(a.text)} ${ts ? "· " + escapeHtml(ts) : ""}</div>
+        </div>`;
+      }).join("");
+    }
+
     function renderDashboard(data) {
       latestData = data;
       const sum = data.summary || {};
@@ -4495,11 +4671,6 @@
         navApBadge.className = "pill neutral";
       }
 
-      const alarms = data.alarms || [];
-      const navAlarmsBadge = document.getElementById("navAlarmsCount");
-      navAlarmsBadge.textContent = fmtNum(alarms.length);
-      navAlarmsBadge.className = `pill ${alarms.length > 0 ? "warn" : "ok"}`;
-
       // Pre-populate Traffic site dropdown & dynamic call estimates before first pull
       populateTrafficSiteSelectFromDashboard(data.sites || []);
       updateTrafficCallEstimate();
@@ -4513,6 +4684,7 @@
       renderSitesTable();
       renderSlowApsSection();
       renderVcTempsSection();
+      renderAlarmsSection();
       renderGlobalAlarmBanners();
       if (activeTabId === "tab-home") renderCharts(data);
 
@@ -4526,18 +4698,6 @@
             <td><span class="pill ${ap.status === "connected" ? "ok" : "bad"}">${escapeHtml(ap.status)}</span></td>
           </tr>`).join("")
         : '<tr><td colspan="5" class="empty">No APs found.</td></tr>';
-
-      const alarmsBadge = document.getElementById("alarmsBadge");
-      alarmsBadge.textContent = `${fmtNum(alarms.length)} Alarm${alarms.length === 1 ? "" : "s"}`;
-      alarmsBadge.className = `pill ${alarms.length > 0 ? "warn" : "ok"}`;
-      document.getElementById("alarmsList").innerHTML = alarms.length
-        ? alarms.map(a => {
-            const sev = (a.severity || "").toLowerCase();
-            const cls = sev === "critical" ? "bad" : (sev === "warn" || sev === "warning" ? "warn" : "ok");
-            const ts = a.timestamp ? new Date(a.timestamp * 1000).toLocaleString() : "";
-            return `<div class="alarm-item"><div class="alarm-top"><strong>${escapeHtml(a.site_name)} — ${escapeHtml(a.type)}</strong><span class="pill ${cls}">${escapeHtml(a.severity)}</span></div><div class="meta-text">${escapeHtml(a.text)} ${ts ? "· " + escapeHtml(ts) : ""}</div></div>`;
-          }).join("")
-        : '<div class="empty">No alarms in the last 24 hours.</div>';
 
       const authBadge = document.getElementById("authUserBadge");
       const logoutBtn = document.getElementById("logoutBtn");

@@ -64,6 +64,7 @@ TEMPLATES_CACHE_TTL_SECONDS = int(os.getenv("TEMPLATES_CACHE_TTL_SECONDS", "1800
 SLOW_AP_CACHE_TTL_SECONDS = int(os.getenv("SLOW_AP_CACHE_TTL_SECONDS", "1800"))
 VC_TEMP_CACHE_TTL_SECONDS = int(os.getenv("VC_TEMP_CACHE_TTL_SECONDS", "900"))
 VC_TEMP_THRESHOLD_DEFAULT_C = float(os.getenv("VC_TEMP_THRESHOLD_C", "60"))
+ALARMS_MIN_SEVERITY_DEFAULT = os.getenv("ALARMS_MIN_SEVERITY", "warn").strip().lower()
 MIST_HOURLY_RATE_LIMIT = int(os.getenv("MIST_HOURLY_RATE_LIMIT", "5000"))
 MIN_REFRESH_INTERVAL = 15
 AUTH_REQUIRED = os.getenv("AUTH_REQUIRED", "1").strip().lower() not in ("0", "false", "no")
@@ -866,6 +867,150 @@ def _merge_vc_member_issues(
     return merged
 
 
+_TEMP_ALARM_KEYWORDS = ("temp", "thermal", "overheat", "overtemp", "temperature")
+_TEMP_C_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:°\s*|deg(?:rees?)?\s*)?c\b", re.IGNORECASE)
+_TEMP_F_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*(?:°\s*|deg(?:rees?)?\s*)?f\b", re.IGNORECASE)
+_TEMP_KV_RE = re.compile(r"(?:temp(?:erature)?|celsius)\s*[:=]\s*(-?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+
+def _normalize_alarm_severity(raw_sev: Any) -> str:
+    s = str(raw_sev or "info").strip().lower()
+    if s in ("critical", "crit", "high", "error", "alert", "emergency"):
+        return "critical"
+    if s in ("warn", "warning", "medium", "major"):
+        return "warn"
+    return "info"
+
+
+def _is_temperature_alarm(alarm_type: str, alarm_group: str, alarm_text: str) -> bool:
+    blob = f"{alarm_type} {alarm_group} {alarm_text}".lower()
+    return any(tok in blob for tok in _TEMP_ALARM_KEYWORDS)
+
+
+def _extract_alarm_temp_c(alarm_obj: Dict[str, Any], alarm_text: str) -> Optional[float]:
+    for key in ("temp_c", "celsius", "temp", "temperature", "max_temp", "current_temp"):
+        val = _parse_temp_celsius(alarm_obj.get(key))
+        if val is not None:
+            return val
+    # Inspect common nested detail fields Mist includes on alarm objects
+    for nested_key in ("details", "data", "extra"):
+        nested = alarm_obj.get(nested_key)
+        if isinstance(nested, dict):
+            for key in ("temp_c", "celsius", "temp", "temperature", "max_temp", "current_temp"):
+                val = _parse_temp_celsius(nested.get(key))
+                if val is not None:
+                    return val
+    if alarm_text:
+        m = _TEMP_C_RE.search(alarm_text)
+        if m:
+            val = _parse_temp_celsius(m.group(1))
+            if val is not None:
+                return val
+        m_kv = _TEMP_KV_RE.search(alarm_text)
+        if m_kv:
+            val = _parse_temp_celsius(m_kv.group(1))
+            if val is not None:
+                return val
+        m_f = _TEMP_F_RE.search(alarm_text)
+        if m_f:
+            try:
+                f_val = float(m_f.group(1))
+                c_val = round((f_val - 32.0) * 5.0 / 9.0, 1)
+                if -20.0 <= c_val <= 150.0:
+                    return c_val
+            except ValueError:
+                pass
+    return None
+
+
+def _build_enriched_alarms(
+    raw_alarms: List[Dict[str, Any]],
+    site_map: Dict[str, Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Normalize Mist org alarms with severity, ack status, and parsed temperature (if thermal)."""
+    enriched: List[Dict[str, Any]] = []
+    for a in raw_alarms:
+        if not isinstance(a, dict):
+            continue
+        sid = str(a.get("site_id") or "")
+        a_type = str(a.get("type") or "alarm")
+        a_group = str(a.get("group") or "")
+        a_text = str(a.get("text") or a_type.replace("_", " "))
+        sev = _normalize_alarm_severity(a.get("severity"))
+        is_temp = _is_temperature_alarm(a_type, a_group, a_text)
+        temp_c = _extract_alarm_temp_c(a, a_text) if is_temp else None
+        hostnames = a.get("hostnames")
+        dev_name = ""
+        if isinstance(hostnames, list) and hostnames:
+            dev_name = str(hostnames[0] or "").strip()
+        elif isinstance(a.get("hostname"), str):
+            dev_name = a.get("hostname", "").strip()
+        enriched.append(
+            {
+                "type": a_type,
+                "severity": sev,
+                "group": a_group,
+                "site_name": a.get("site_name") or site_map.get(sid, {}).get("name", "Org"),
+                "device_name": dev_name,
+                "text": a_text,
+                "count": int(a.get("count") or 1),
+                "acked": bool(a.get("acked") or a.get("ack_admin_id") or a.get("resolved")),
+                "is_temp_alarm": is_temp,
+                "temp_c": temp_c,
+                "timestamp": a.get("last_seen") or a.get("timestamp"),
+            }
+        )
+    return enriched
+
+
+def _filter_alarms_view(
+    enriched_alarms: List[Dict[str, Any]],
+    min_severity: Optional[str] = None,
+    temp_threshold_c: Optional[float] = None,
+    limit: int = 50,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Filter out noisy info/acked alerts and sub-threshold temperature warnings."""
+    sev_mode = str(min_severity or ALARMS_MIN_SEVERITY_DEFAULT or "warn").strip().lower()
+    if sev_mode not in ("critical", "warn", "all"):
+        sev_mode = "warn"
+    thresh = get_vc_temp_threshold_c() if temp_threshold_c is None else round(float(temp_threshold_c), 1)
+    sev_rank = {"critical": 2, "warn": 1, "info": 0}
+    min_rank = 2 if sev_mode == "critical" else (1 if sev_mode == "warn" else 0)
+
+    filtered: List[Dict[str, Any]] = []
+    suppressed_low_sev = 0
+    suppressed_temp = 0
+    suppressed_acked = 0
+
+    for item in enriched_alarms:
+        if item.get("acked"):
+            suppressed_acked += 1
+            continue
+        rank = sev_rank.get(str(item.get("severity") or "info").lower(), 0)
+        if rank < min_rank:
+            suppressed_low_sev += 1
+            continue
+        temp_c = item.get("temp_c")
+        if item.get("is_temp_alarm") and isinstance(temp_c, (int, float)) and float(temp_c) < thresh:
+            suppressed_temp += 1
+            continue
+        filtered.append(item)
+
+    shown = filtered[:limit]
+    total_raw = len(enriched_alarms)
+    meta = {
+        "total_raw": total_raw,
+        "shown_count": len(shown),
+        "filtered_out_count": suppressed_low_sev + suppressed_temp + suppressed_acked,
+        "filtered_low_severity": suppressed_low_sev,
+        "filtered_temp_below_threshold": suppressed_temp,
+        "filtered_acked": suppressed_acked,
+        "min_severity": sev_mode,
+        "temp_threshold_c": thresh,
+    }
+    return shown, meta
+
+
 def _record_mist_api_call() -> None:
     now = time.time()
     cutoff = now - 3600.0
@@ -1541,32 +1686,39 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             warnings.append(f"Switch stats unavailable: {exc}")
 
         alarms: List[Dict[str, Any]] = []
+        alarms_all: List[Dict[str, Any]] = []
+        alarms_meta: Dict[str, Any] = _filter_alarms_view([])[1]
         alarm_vc_issues: List[Dict[str, Any]] = []
         try:
             alarms_resp = mist_get(
                 session,
                 f"/api/v1/orgs/{MIST_ORG_ID}/alarms/search",
-                params={"duration": "1d", "limit": 50},
+                params={"duration": "1d", "limit": 100},
             )
             raw_alarms = alarms_resp.get("results", []) if isinstance(alarms_resp, dict) else []
             alarm_vc_issues = extract_vc_alarm_issues(raw_alarms, site_map, switch_info_map)
-            for a in raw_alarms[:25]:
-                sid = a.get("site_id", "")
-                alarms.append(
-                    {
-                        "type": a.get("type", "alarm"),
-                        "severity": a.get("severity", "info"),
-                        "group": a.get("group", ""),
-                        "site_name": a.get("site_name") or site_map.get(sid, {}).get("name", "Org"),
-                        "text": a.get("text") or a.get("type", "").replace("_", " "),
-                        "count": a.get("count", 1),
-                        "timestamp": a.get("last_seen") or a.get("timestamp"),
-                    }
-                )
+            alarms_all = _build_enriched_alarms(raw_alarms, site_map)
+            alarms, alarms_meta = _filter_alarms_view(alarms_all)
         except MistRateLimitError:
             raise
         except Exception as exc:
             warnings.append(f"Alarms unavailable: {exc}")
+
+        # Compute live per-AP client counts directly from deduplicated wireless clients
+        # (Mist's org-wide /orgs/{org_id}/stats/devices?type=ap omits num_clients — 0 extra API calls).
+        live_ap_clients_by_mac: Dict[str, int] = {}
+        live_ap_clients_by_id: Dict[str, int] = {}
+        for clients_list in site_clients.values():
+            for c in clients_list:
+                if not isinstance(c, dict):
+                    continue
+                c_ap_mac = normalize_mac(c.get("ap_mac"))
+                c_ap_id = str(c.get("ap_id") or "").strip().lower()
+                if c_ap_mac:
+                    live_ap_clients_by_mac[c_ap_mac] = live_ap_clients_by_mac.get(c_ap_mac, 0) + 1
+                if c_ap_id:
+                    live_ap_clients_by_id[c_ap_id] = live_ap_clients_by_id.get(c_ap_id, 0) + 1
+        has_live_ap_client_map = bool(live_ap_clients_by_mac or live_ap_clients_by_id)
 
         total_wireless_users = 0
         total_ap_reported_clients = 0
@@ -1632,9 +1784,24 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                 ap_name = ap.get("name") or ap.get("mac", "Unnamed AP")
                 ap_model = ap.get("model", "")
                 ap_mac = ap.get("mac", "")
+                ap_mac_norm = normalize_mac(ap_mac)
+                ap_id_norm = str(ap.get("id") or "").strip().lower()
                 ip_stat = ap.get("ip_stat") if isinstance(ap.get("ip_stat"), dict) else {}
                 ap_ip = str(ap.get("ip") or ip_stat.get("ip") or "").strip()
-                ap_clients = int(ap.get("num_clients") or 0)
+
+                raw_ap_clients = ap.get("num_clients")
+                live_cnt = 0
+                if ap_mac_norm and ap_mac_norm in live_ap_clients_by_mac:
+                    live_cnt = live_ap_clients_by_mac[ap_mac_norm]
+                elif ap_id_norm and ap_id_norm in live_ap_clients_by_id:
+                    live_cnt = live_ap_clients_by_id[ap_id_norm]
+
+                if live_cnt > 0:
+                    ap_clients = live_cnt
+                elif raw_ap_clients is not None and (not has_live_ap_client_map or org_aps_report_clients):
+                    ap_clients = int(raw_ap_clients or 0)
+                else:
+                    ap_clients = 0
 
                 if is_online:
                     aps_online += 1
@@ -1676,6 +1843,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
                         "name": ap_name,
                         "site_name": site_name,
                         "model": ap_model,
+                        "mac": format_mac(ap_mac_norm) if ap_mac_norm else ap_mac,
                         "ip": ap_ip,
                         "num_clients": ap_clients,
                         "status": "connected" if is_online else (status or "disconnected"),
@@ -1718,7 +1886,7 @@ def collect_mist_snapshot() -> Dict[str, Any]:
         slow_aps_meta = _build_slow_aps_meta(active_ap_sites_count=len(active_ap_sites))
 
         sites_summary.sort(key=lambda s: (-s["total_users"], s["name"].lower()))
-        all_aps_list.sort(key=lambda a: (-a["num_clients"], a["name"].lower()))
+        all_aps_list.sort(key=lambda a: (-a["num_clients"], 0 if a["status"] == "connected" else 1, a["name"].lower()))
         slow_aps.sort(key=lambda a: (a["speed"], a["site_name"].lower(), a["name"].lower()))
         offline_aps.sort(key=lambda d: (d["site_name"].lower(), d["name"].lower()))
         offline_switches.sort(key=lambda d: (d["site_name"].lower(), d["name"].lower()))
@@ -1808,6 +1976,8 @@ def collect_mist_snapshot() -> Dict[str, Any]:
             },
             "polling": get_polling_state(),
             "alarms": alarms,
+            "alarms_all": alarms_all,
+            "alarms_meta": alarms_meta,
             "warnings": warnings,
             "api_quota": get_mist_api_quota_snapshot(),
             "fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -2239,6 +2409,11 @@ def _attach_live_stats_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload["vc_member_issues_meta"] = vc_member_meta
     summary["vc_member_issues_count"] = len(vc_member_issues)
 
+    if isinstance(payload.get("alarms_all"), list):
+        filtered_alarms, alarms_meta = _filter_alarms_view(payload["alarms_all"])
+        payload["alarms"] = filtered_alarms
+        payload["alarms_meta"] = alarms_meta
+
     payload["summary"] = summary
 
     estimates = dict(payload.get("estimates") or {})
@@ -2657,11 +2832,16 @@ def api_vc_temps_threshold():
 
     updated = set_vc_temp_threshold_c(val)
     evaluated, meta = _build_vc_temps_view(None)
+    with _cache_lock:
+        cached_alarms_all = list((_cache_data or {}).get("alarms_all") or [])
+    filtered_alarms, alarms_meta = _filter_alarms_view(cached_alarms_all, temp_threshold_c=updated)
     resp = jsonify(
         {
             "threshold_c": updated,
             "vc_temps": evaluated,
             "vc_temps_meta": meta,
+            "alarms": filtered_alarms,
+            "alarms_meta": alarms_meta,
         }
     )
     resp.headers["Cache-Control"] = "no-store"

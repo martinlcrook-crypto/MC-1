@@ -475,6 +475,73 @@ def _fetch_client_app_usage(
     return []
 
 
+def _extract_bytes_from_insight(payload: Any, fallback_interval_sec: int = 600) -> Tuple[float, float, float, bool]:
+    """
+    Parse total/rx/tx bytes from any Mist Client Insights response shape:
+      - {"rx_bytes": [...], "tx_bytes": [...], "bytes": [...]}
+      - {"results": [185, 197, ...]}  (single-metric /bytes endpoint)
+      - {"results": [{"rx_bytes": ..., "tx_bytes": ..., "bytes": ...}, ...]}
+      - {"rx_bps": [...], "tx_bps": [...]} (last-resort bps * interval / 8 conversion)
+    Returns (total_bytes, rx_bytes, tx_bytes, has_rxtx).
+    """
+    def _sum_num_or_list(val: Any) -> float:
+        if isinstance(val, (int, float)) and not isinstance(val, bool) and val > 0:
+            return float(val)
+        if isinstance(val, list):
+            return sum(float(v) for v in val if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0)
+        return 0.0
+
+    if isinstance(payload, list):
+        # List of numbers or dicts
+        num_sum = _sum_num_or_list(payload)
+        if num_sum > 0:
+            return num_sum, 0.0, 0.0, False
+        rx_s = tx_s = tot_s = 0.0
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            r = _sum_num_or_list(row.get("rx_bytes"))
+            t = _sum_num_or_list(row.get("tx_bytes"))
+            b = _sum_num_or_list(row.get("total_bytes") if row.get("total_bytes") is not None else row.get("bytes"))
+            rx_s += r
+            tx_s += t
+            tot_s += b if b > 0 else (r + t)
+        if rx_s > 0 or tx_s > 0:
+            return max(tot_s, rx_s + tx_s), rx_s, tx_s, True
+        return tot_s, 0.0, 0.0, False
+
+    if not isinstance(payload, dict):
+        return 0.0, 0.0, 0.0, False
+
+    rx_sum = _sum_num_or_list(payload.get("rx_bytes"))
+    tx_sum = _sum_num_or_list(payload.get("tx_bytes"))
+    bytes_sum = _sum_num_or_list(payload.get("bytes"))
+    if rx_sum > 0 or tx_sum > 0:
+        return max(bytes_sum, rx_sum + tx_sum), rx_sum, tx_sum, True
+    if bytes_sum > 0:
+        return bytes_sum, 0.0, 0.0, False
+
+    # Single-metric endpoints return {"results": [n1, n2, ...]} or {"results": [{...}]}
+    res_val = payload.get("results")
+    if isinstance(res_val, list) and res_val:
+        t_r, rx_r, tx_r, has_rt = _extract_bytes_from_insight(res_val, fallback_interval_sec=fallback_interval_sec)
+        if t_r > 0:
+            return t_r, rx_r, tx_r, has_rt
+
+    # Last-resort: convert rx_bps / tx_bps buckets into approximate bytes
+    rx_bps = payload.get("rx_bps") if isinstance(payload.get("rx_bps"), list) else []
+    tx_bps = payload.get("tx_bps") if isinstance(payload.get("tx_bps"), list) else []
+    if rx_bps or tx_bps:
+        iv = payload.get("interval")
+        iv_sec = int(iv) if isinstance(iv, (int, float)) and iv > 0 else fallback_interval_sec
+        rx_est = sum(float(v) * iv_sec / 8.0 for v in rx_bps if isinstance(v, (int, float)) and v > 0)
+        tx_est = sum(float(v) * iv_sec / 8.0 for v in tx_bps if isinstance(v, (int, float)) and v > 0)
+        if rx_est > 0 or tx_est > 0:
+            return rx_est + tx_est, rx_est, tx_est, True
+
+    return 0.0, 0.0, 0.0, False
+
+
 def _fetch_client_total_bytes(
     session: requests.Session,
     api_host: str,
@@ -482,41 +549,85 @@ def _fetch_client_total_bytes(
     mac_raw: str,
     start_ts: int,
     end_ts: int,
-) -> Tuple[float, float, float]:
-    """Return (total_bytes, rx_bytes, tx_bytes) from Mist Client Insights stats."""
+    is_wired_only: bool = False,
+) -> Tuple[float, float, float, bool]:
+    """
+    Return (total_bytes, rx_bytes, tx_bytes, has_rxtx) from Mist historical Client Insights
+    covering the full [start_ts, end_ts] window (works for both online AND disconnected clients).
+    """
     mac_hex = normalize_mac(mac_raw)
     if not site_id or not mac_hex:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, False
 
-    for url in (
-        f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}/stats",
-        f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}",
-    ):
+    span_sec = max(60, int(end_ts - start_ts))
+    pref_interval = "600" if span_sec <= 86400 else "3600"
+    pref_iv_int = int(pref_interval)
+    scope_prefix = "wired-client" if is_wired_only else "client"
+
+    attempts: List[Tuple[str, Dict[str, str]]] = [
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/{scope_prefix}/{mac_hex}/stats",
+            {"metrics": "rx_bytes,tx_bytes,bytes", "start": str(start_ts), "end": str(end_ts), "interval": pref_interval},
+        ),
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/{scope_prefix}/{mac_hex}",
+            {"metrics": "rx_bytes,tx_bytes,bytes", "start": str(start_ts), "end": str(end_ts)},
+        ),
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/{scope_prefix}/{mac_hex}/bytes",
+            {"start": str(start_ts), "end": str(end_ts)},
+        ),
+    ]
+    if is_wired_only:
+        # Also try generic /insights/client/{mac} in case Mist aggregates wired stats there
+        attempts.append((
+            f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}/stats",
+            {"metrics": "rx_bytes,tx_bytes,bytes", "start": str(start_ts), "end": str(end_ts), "interval": pref_interval},
+        ))
+
+    for idx, (url, params) in enumerate(attempts):
         try:
-            resp = session.get(
-                url,
-                params={
-                    "metrics": "rx_bytes,tx_bytes",
-                    "start": str(start_ts),
-                    "end": str(end_ts),
-                    "interval": "3600",
-                },
-                timeout=15,
-            )
+            resp = session.get(url, params=params, timeout=15)
+            if resp.status_code == 429:
+                return 0.0, 0.0, 0.0, False
+            if resp.status_code == 400 and params.get("interval") == "600":
+                retry_params = dict(params)
+                retry_params["interval"] = "3600"
+                resp = session.get(url, params=retry_params, timeout=15)
+                if resp.status_code == 429:
+                    return 0.0, 0.0, 0.0, False
             if resp.status_code != 200:
                 continue
-            payload = resp.json()
-            if not isinstance(payload, dict):
-                continue
-            rx_arr = payload.get("rx_bytes") if isinstance(payload.get("rx_bytes"), list) else []
-            tx_arr = payload.get("tx_bytes") if isinstance(payload.get("tx_bytes"), list) else []
-            rx_sum = sum(float(v) for v in rx_arr if isinstance(v, (int, float)) and v > 0)
-            tx_sum = sum(float(v) for v in tx_arr if isinstance(v, (int, float)) and v > 0)
-            if rx_sum > 0 or tx_sum > 0:
-                return rx_sum + tx_sum, rx_sum, tx_sum
+            tot, rx_b, tx_b, has_rt = _extract_bytes_from_insight(resp.json(), fallback_interval_sec=pref_iv_int)
+            if tot > 0:
+                return tot, rx_b, tx_b, has_rt
         except Exception:
             continue
-    return 0.0, 0.0, 0.0
+
+    # Last-resort single-metric rx_bytes + tx_bytes calls (for older Mist clusters where /stats omits them)
+    rx_single = tx_single = 0.0
+    got_any = False
+    for metric_name in ("rx_bytes", "tx_bytes"):
+        try:
+            r = session.get(
+                f"{api_host}/api/v1/sites/{site_id}/insights/{scope_prefix}/{mac_hex}/{metric_name}",
+                params={"start": str(start_ts), "end": str(end_ts)},
+                timeout=12,
+            )
+            if r.status_code == 200:
+                t_m, _, _, _ = _extract_bytes_from_insight(r.json(), fallback_interval_sec=pref_iv_int)
+                if t_m > 0:
+                    got_any = True
+                    if metric_name == "rx_bytes":
+                        rx_single = t_m
+                    else:
+                        tx_single = t_m
+        except Exception:
+            continue
+    if got_any:
+        return rx_single + tx_single, rx_single, tx_single, True
+
+    return 0.0, 0.0, 0.0, False
 
 
 def _fetch_site_app_usage(
@@ -1069,15 +1180,17 @@ def _answer_user_app_traffic(
 
     display_user = next((d["username"] for d in devices if d.get("username")), target)
 
-    # Pick devices active in/near the window (or fallback to top 5 most recent)
+    # Pick ALL devices active since start of window (including now-disconnected devices!)
+    # Sort by most recently seen (not online-only) so recently disconnected high-traffic devices are never dropped.
+    recent_devs = sorted(devices, key=lambda d: (-int(d.get("last_seen") or 0), 0 if d.get("online") else 1, d["mac"]))
     active_devs = [
-        d for d in devices
-        if d.get("online") or (d.get("last_seen") or 0) >= win_start - 3600
+        d for d in recent_devs
+        if d.get("online") or (d.get("last_seen") or 0) >= win_start - 3600 or (d.get("last_seen") or 0) == 0
     ]
     if not active_devs:
-        active_devs = devices[:5]
+        active_devs = recent_devs[:6]
     else:
-        active_devs = active_devs[:8]
+        active_devs = active_devs[:10]
 
     # Build unique (site_id, device) pairs covering EVERY site each MAC visited
     query_pairs: List[Tuple[str, Dict[str, Any]]] = []
@@ -1099,7 +1212,6 @@ def _answer_user_app_traffic(
         return sid, dev_obj, apps
 
     app_totals: Dict[str, Dict[str, Any]] = {}  # lower_name -> {name, total_bytes, rx_bytes, tx_bytes, by_device}
-    per_device_app_hits: List[Dict[str, Any]] = []
     queried_devices_count = len({d["mac_raw"] for _, d in query_pairs})
 
     if query_pairs:
@@ -1112,6 +1224,8 @@ def _answer_user_app_traffic(
                     tb = float(a.get("total_bytes") or 0.0)
                     rxb = a.get("rx_bytes")
                     txb = a.get("tx_bytes")
+                    if tb <= 0 and not ((rxb or 0) > 0 or (txb or 0) > 0):
+                        continue
                     entry = app_totals.get(akey)
                     if entry is None:
                         entry = {
@@ -1148,29 +1262,52 @@ def _answer_user_app_traffic(
                         d_ent["rx_bytes"] += float(rxb or 0.0)
                         d_ent["tx_bytes"] += float(txb or 0.0)
 
-    ranked_apps = sorted(app_totals.values(), key=lambda x: -x["total_bytes"])
+    ranked_apps = [x for x in sorted(app_totals.values(), key=lambda x: -x["total_bytes"]) if x["total_bytes"] > 0]
     total_classified_bytes = sum(x["total_bytes"] for x in ranked_apps)
 
     # Build clickable Mist Insights links for the user's devices
     links: List[Dict[str, str]] = []
     for d in active_devs[:4]:
         if d.get("site_id"):
-            links.append(_link_client(org_id, ui_host, d["site_id"], d["mac"], f"{d.get('hostname') or d['mac']} Insights", kind="client"))
+            kind = "wired" if d.get("sources") == ["Wired"] else "client"
+            links.append(_link_client(org_id, ui_host, d["site_id"], d["mac"], f"{d.get('hostname') or d['mac']} Insights", kind=kind))
 
-    # If Mist returned no app breakdown (or total traffic requested), also fetch total rx_bytes/tx_bytes
+    # Fetch historical client rx_bytes/tx_bytes/bytes across ALL queried (site, device) pairs
+    # so disconnected clients still show their full accumulated total since midnight!
     total_client_bytes = 0.0
     total_client_rx = 0.0
     total_client_tx = 0.0
+    any_client_rxtx = False
+    per_device_totals: List[Dict[str, Any]] = []
+
     if (not ranked_apps or not requested_app) and query_pairs:
         def fetch_pair_bytes(pair: Tuple[str, Dict[str, Any]]):
             sid, dev_obj = pair
-            return _fetch_client_total_bytes(session, api_host, sid, dev_obj["mac_raw"], win_start, win_end)
+            is_wired_only = (dev_obj.get("sources") == ["Wired"])
+            tb, rxb, txb, has_rt = _fetch_client_total_bytes(
+                session, api_host, sid, dev_obj["mac_raw"], win_start, win_end, is_wired_only=is_wired_only
+            )
+            return sid, dev_obj, tb, rxb, txb, has_rt
 
         with ThreadPoolExecutor(max_workers=min(6, len(query_pairs))) as pool:
-            for tb, rxb, txb in pool.map(fetch_pair_bytes, query_pairs[:6]):
-                total_client_bytes += tb
-                total_client_rx += rxb
-                total_client_tx += txb
+            for sid, dev_obj, tb, rxb, txb, has_rt in pool.map(fetch_pair_bytes, query_pairs):
+                if tb > 0:
+                    total_client_bytes += tb
+                    if has_rt:
+                        any_client_rxtx = True
+                        total_client_rx += rxb
+                        total_client_tx += txb
+                    per_device_totals.append({
+                        "mac": dev_obj["mac"],
+                        "label": _device_short_label(dev_obj),
+                        "online": bool(dev_obj.get("online")),
+                        "site_name": site_name_map.get(sid) or dev_obj.get("site_name") or sid,
+                        "total_bytes": tb,
+                        "rx_bytes": rxb,
+                        "tx_bytes": txb,
+                        "has_rxtx": has_rt,
+                    })
+        per_device_totals.sort(key=lambda r: -r["total_bytes"])
 
     # Case 1: Specific application requested (e.g. "how much instagram traffic has nick.bull generated today")
     if requested_app:
@@ -1260,9 +1397,9 @@ def _answer_user_app_traffic(
                 "context": {"last_client_query": target, "last_client_mode": mode},
             }
 
+        tot_rxtx = f" (↓ `{_fmt_bytes(total_client_rx)}` / ↑ `{_fmt_bytes(total_client_tx)}`)" if any_client_rxtx else ""
         tot_note = (
-            f" Total client traffic recorded {win_label}: **{_fmt_bytes(total_client_bytes)}** "
-            f"(↓ `{_fmt_bytes(total_client_rx)}` / ↑ `{_fmt_bytes(total_client_tx)}`)."
+            f" Total historical client traffic recorded {win_label}: **{_fmt_bytes(total_client_bytes)}**{tot_rxtx}."
             if total_client_bytes > 0
             else ""
         )
@@ -1282,51 +1419,70 @@ def _answer_user_app_traffic(
             "context": {"last_client_query": target, "last_client_mode": mode},
         }
 
-    # Case 2: General application / traffic usage breakdown for user
-    if ranked_apps:
-        app_lines = [
-            f"- **#{i+1} {a['name']}** — **{_fmt_bytes(a['total_bytes'])}**"
-            + (f" ({a['total_bytes'] / total_classified_bytes * 100:.1f}%)" if total_classified_bytes > 0 else "")
-            + (f" · ↓ {_fmt_bytes(a['rx_bytes'])} / ↑ {_fmt_bytes(a['tx_bytes'])}" if a["has_rxtx"] else "")
-            for i, a in enumerate(ranked_apps[:8])
-        ]
-        dev_summary = ", ".join(f"`{d['mac']}` ({_device_short_label(d)})" for d in active_devs[:4])
-        extra_dev = f" +{len(active_devs) - 4} more" if len(active_devs) > 4 else ""
-        return {
-            "reply": (
-                f"Top applications for **{display_user}** **{win_label}** across **{queried_devices_count}** device(s) "
-                f"({dev_summary}{extra_dev}) — total classified app traffic **{_fmt_bytes(total_classified_bytes)}**:\n"
-                + "\n".join(app_lines)
-            ),
-            "highlights": [
-                {"label": "Top App", "value": f"{ranked_apps[0]['name']} ({_fmt_bytes(ranked_apps[0]['total_bytes'])})"},
-                {"label": "Total App Traffic", "value": _fmt_bytes(total_classified_bytes)},
-                {"label": "Devices Checked", "value": str(queried_devices_count)},
-            ],
-            "links": links,
-            "context": {"last_client_query": target, "last_client_mode": mode},
-        }
+    # Case 2: General traffic / application usage for user (works for BOTH online & disconnected clients!)
+    effective_total = max(total_client_bytes, total_classified_bytes)
+    since_note = f" (since `{_fmt_local_time(win_start, tzinfo)}`)" if win_label in ("today", "this morning") else ""
+    online_cnt = sum(1 for d in active_devs if d.get("online"))
+    offline_cnt = len(active_devs) - online_cnt
+    conn_state_note = (
+        "currently offline"
+        if online_cnt == 0
+        else (f"{online_cnt} online" if offline_cnt == 0 else f"{online_cnt} online, {offline_cnt} offline")
+    )
 
-    if total_client_bytes > 0:
+    if effective_total > 0:
+        sections: List[str] = []
+        rxtx_clause = (
+            f" (Download `{_fmt_bytes(total_client_rx)}`, Upload `{_fmt_bytes(total_client_tx)}`)"
+            if any_client_rxtx and total_client_bytes >= total_classified_bytes
+            else ""
+        )
+        header = (
+            f"**{display_user}** used **{_fmt_bytes(effective_total)}** of traffic **{win_label}**{since_note}{rxtx_clause} "
+            f"across **{queried_devices_count}** device(s) ({conn_state_note})."
+        )
+        sections.append(header)
+
+        if per_device_totals:
+            dev_lines = [
+                (
+                    f"- **`{r['mac']}`** ({r['label']} · {'Online' if r['online'] else 'Offline'} · **{r['site_name']}**) — "
+                    f"**{_fmt_bytes(r['total_bytes'])}**"
+                    + (f" (↓ {_fmt_bytes(r['rx_bytes'])} / ↑ {_fmt_bytes(r['tx_bytes'])})" if r["has_rxtx"] else "")
+                )
+                for r in per_device_totals[:8]
+            ]
+            sections.append("Traffic by device:\n" + "\n".join(dev_lines))
+
+        if ranked_apps:
+            app_lines = [
+                f"- **#{i+1} {a['name']}** — **{_fmt_bytes(a['total_bytes'])}**"
+                + (f" ({a['total_bytes'] / total_classified_bytes * 100:.1f}%)" if total_classified_bytes > 0 else "")
+                + (f" · ↓ {_fmt_bytes(a['rx_bytes'])} / ↑ {_fmt_bytes(a['tx_bytes'])}" if a["has_rxtx"] else "")
+                for i, a in enumerate(ranked_apps[:8])
+            ]
+            sections.append(f"Top classified apps (`{_fmt_bytes(total_classified_bytes)}`):\n" + "\n".join(app_lines))
+
+        hl = [
+            {"label": f"Total Traffic ({win_label})", "value": _fmt_bytes(effective_total)},
+        ]
+        if any_client_rxtx and total_client_bytes > 0:
+            hl.append({"label": "Download / Upload", "value": f"{_fmt_bytes(total_client_rx)} / {_fmt_bytes(total_client_tx)}"})
+        if ranked_apps:
+            hl.append({"label": "Top App", "value": f"{ranked_apps[0]['name']} ({_fmt_bytes(ranked_apps[0]['total_bytes'])})"})
+        hl.append({"label": "Devices Checked", "value": f"{queried_devices_count} ({conn_state_note})"})
+
         return {
-            "reply": (
-                f"**{display_user}** transferred **{_fmt_bytes(total_client_bytes)}** **{win_label}** "
-                f"(Download `{_fmt_bytes(total_client_rx)}`, Upload `{_fmt_bytes(total_client_tx)}`) "
-                f"across **{queried_devices_count}** device(s), though Mist returned no per-app breakdown for this window."
-            ),
-            "highlights": [
-                {"label": "Total Traffic", "value": _fmt_bytes(total_client_bytes)},
-                {"label": "Download / Upload", "value": f"{_fmt_bytes(total_client_rx)} / {_fmt_bytes(total_client_tx)}"},
-                {"label": "Devices Checked", "value": str(queried_devices_count)},
-            ],
+            "reply": "\n".join(sections),
+            "highlights": hl[:4],
             "links": links,
             "context": {"last_client_query": target, "last_client_mode": mode},
         }
 
     return {
         "reply": (
-            f"Mist Client Insights returned no traffic or application telemetry for **{display_user}** **{win_label}** "
-            f"(checked **{queried_devices_count}** device MAC(s))."
+            f"Mist Client Insights returned no traffic or application telemetry for **{display_user}** **{win_label}**{since_note} "
+            f"(checked **{queried_devices_count}** device MAC(s), {conn_state_note})."
         ),
         "highlights": [{"label": "Devices Checked", "value": str(queried_devices_count)}],
         "links": links,

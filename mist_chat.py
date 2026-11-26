@@ -21,7 +21,7 @@ DOTTED_USER_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9_\-]{1,24}\.[a-zA-Z][a-zA-Z0-9
 UP_USER_RE = re.compile(r"\b(?:up\d{5,9}|[a-z]{2,4}\d{4,8})\b", re.IGNORECASE)
 QUOTED_RE = re.compile(r'["\']([^"\']{2,80})["\']')
 USER_CLAUSE_RE = re.compile(
-    r"\b(?:did|is|was|has|does|for|user|username|client|lookup|find|locate|check|about|show(?:\s+me)?)\s+"
+    r"\b(?:did|is|was|has|does|for|with|by|of|user|username|client|lookup|find|locate|check|about|show(?:\s+me)?)\s+"
     r"([a-zA-Z0-9][a-zA-Z0-9._@\\\-]{2,64})\b",
     re.IGNORECASE,
 )
@@ -42,6 +42,14 @@ STOP_ENTITIES = {
     "signal", "rssi", "busiest", "ex4000", "ex4100", "ex41000", "4000", "4100", "41000",
     "status", "health", "summary", "overview", "help", "me", "my", "our", "org", "mist",
     "user", "users", "client", "clients", "people", "anyone", "someone",
+    "show", "list", "associated", "mac", "macs", "address", "addresses", "seen", "generated",
+    "generate", "data", "bandwidth", "usage", "used", "using", "app", "apps", "application",
+    "applications", "service", "services", "level", "levels", "insights", "total", "bytes",
+    "instagram", "youtube", "tiktok", "netflix", "teams", "zoom", "spotify", "whatsapp",
+    "facebook", "snapchat", "reddit", "apple", "icloud", "google", "gmail", "office365",
+    "onedrive", "outlook", "discord", "twitch", "steam", "twitter", "chatgpt", "openai",
+    "amazon", "bbc", "iplayer", "linkedin", "github", "dropbox", "slack", "webex", "xbox",
+    "playstation", "microsoft", "ios", "android", "windows", "macos",
 }
 
 SSID_PATTERNS = [
@@ -51,9 +59,98 @@ SSID_PATTERNS = [
 ]
 
 FOLLOWUP_PRONOUN_RE = re.compile(
-    r"\b(?:he|she|they|him|her|them|his|their|it|its|that user|that client|that device|same user|same device)\b",
+    r"\b(?:he|she|they|him|her|them|his|their|it|its|that user|that client|that device|those devices|same user|same device)\b",
     re.IGNORECASE,
 )
+
+# Canonical app name -> list of search tokens / aliases (lowercase)
+KNOWN_APP_ALIASES: List[Tuple[str, Tuple[str, ...]]] = [
+    ("Instagram", ("instagram",)),
+    ("YouTube", ("youtube",)),
+    ("TikTok", ("tiktok", "tik tok")),
+    ("Microsoft Teams", ("microsoft teams", "ms teams", "msteams", "teams")),
+    ("Zoom", ("zoom",)),
+    ("Netflix", ("netflix",)),
+    ("Spotify", ("spotify",)),
+    ("WhatsApp", ("whatsapp", "whats app")),
+    ("Facebook", ("facebook", "fb messenger")),
+    ("Snapchat", ("snapchat",)),
+    ("Reddit", ("reddit",)),
+    ("iCloud", ("icloud",)),
+    ("Apple", ("apple", "itunes", "app store")),
+    ("Google", ("google drive", "google meet", "gmail", "google")),
+    ("Microsoft 365", ("office 365", "office365", "microsoft 365", "o365", "onedrive", "sharepoint", "outlook")),
+    ("Discord", ("discord",)),
+    ("Twitch", ("twitch",)),
+    ("Steam", ("steam",)),
+    ("X / Twitter", ("twitter",)),
+    ("ChatGPT / OpenAI", ("chatgpt", "openai")),
+    ("Amazon", ("prime video", "amazon", "aws")),
+    ("BBC iPlayer", ("iplayer", "bbc")),
+    ("LinkedIn", ("linkedin",)),
+    ("GitHub", ("github",)),
+    ("Dropbox", ("dropbox",)),
+    ("Slack", ("slack",)),
+    ("Webex", ("webex",)),
+    ("Xbox", ("xbox",)),
+    ("PlayStation", ("playstation", "psn")),
+]
+
+DYNAMIC_APP_RE = re.compile(
+    r"\bhow\s+much\s+([a-zA-Z0-9][a-zA-Z0-9 ._\-]{1,26}?)\s+(?:traffic|data|bandwidth|usage)\b",
+    re.IGNORECASE,
+)
+
+
+def _fmt_bytes(num_bytes: Optional[float]) -> str:
+    if num_bytes is None or not isinstance(num_bytes, (int, float)) or num_bytes < 0:
+        return "0 B"
+    val = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if val < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(round(val))} B"
+            return f"{val:.2f} {unit}" if val < 10 else f"{val:.1f} {unit}"
+        val /= 1024.0
+    return f"{val:.1f} TB"
+
+
+def _detect_app_query(message: str) -> Tuple[bool, Optional[str], Tuple[str, ...]]:
+    """Return (wants_app_or_traffic, display_app_name, match_tokens)."""
+    low = message.lower()
+    for disp, aliases in KNOWN_APP_ALIASES:
+        for alias in aliases:
+            if re.search(r"\b" + re.escape(alias) + r"\b", low):
+                # Use all meaningful aliases plus canonical name for matching Mist app labels
+                tokens = tuple(dict.fromkeys([alias, disp.lower(), *[a for a in aliases if len(a) >= 3]]))
+                return True, disp, tokens
+
+    m_dyn = DYNAMIC_APP_RE.search(message)
+    if m_dyn:
+        cand = m_dyn.group(1).strip()
+        cand_low = cand.lower()
+        if cand_low not in ("total", "overall", "wifi", "wi-fi", "wireless", "wired", "network", "internet", "eduroam", "all", "app", "application"):
+            return True, cand, (cand_low,)
+
+    wants_general = any(
+        k in low
+        for k in (
+            "app ", "apps", "application", "applications", "traffic", "bandwidth",
+            "data usage", "how much data", "bytes", "generated", "top app", "service level",
+        )
+    )
+    return wants_general, None, ()
+
+
+def _has_explicit_time_window(message: str) -> bool:
+    low = message.lower()
+    return any(
+        k in low
+        for k in (
+            "today", "this morning", "morning", "yesterday", "last hour", "past hour", "1h",
+            "24h", "24 hours", "this week", "7d", "7 days", "past week", "this month", "30d", "30 days", "past month",
+        )
+    )
 
 
 def _resolve_tz(tz_name: Optional[str], tz_offset_minutes: Optional[int]):
@@ -274,6 +371,969 @@ def _find_mentioned_device(message: str, snapshot: Dict[str, Any]) -> Optional[T
     return None
 
 
+def _parse_apps_payload(payload: Any) -> List[Dict[str, Any]]:
+    """Normalize Mist Insights top-app-by-bytes responses across classic and multi-metric schemas."""
+    raw_items: List[Any] = []
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("results"), list):
+            raw_items = payload["results"]
+        elif isinstance(payload.get("top-app-by-bytes"), list):
+            raw_items = payload["top-app-by-bytes"]
+        elif isinstance(payload.get("top-app-by-bytes"), dict) and isinstance(payload["top-app-by-bytes"].get("results"), list):
+            raw_items = payload["top-app-by-bytes"]["results"]
+        elif isinstance(payload.get("apps"), list):
+            raw_items = payload["apps"]
+
+    out: List[Dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        name = str(
+            item.get("app")
+            or item.get("name")
+            or item.get("app_name")
+            or item.get("application")
+            or item.get("service")
+            or item.get("key")
+            or ""
+        ).strip()
+        if not name:
+            continue
+        rx_raw = item.get("rx_bytes")
+        tx_raw = item.get("tx_bytes")
+        rx_b = float(rx_raw) if isinstance(rx_raw, (int, float)) and rx_raw >= 0 else None
+        tx_b = float(tx_raw) if isinstance(tx_raw, (int, float)) and tx_raw >= 0 else None
+        tot_raw = item.get("total_bytes")
+        if tot_raw is None:
+            tot_raw = item.get("bytes")
+        if tot_raw is None:
+            tot_raw = item.get("usage")
+        if isinstance(tot_raw, (int, float)) and tot_raw >= 0:
+            tot_b = float(tot_raw)
+        elif rx_b is not None or tx_b is not None:
+            tot_b = (rx_b or 0.0) + (tx_b or 0.0)
+        else:
+            tot_b = 0.0
+        out.append({
+            "app": name,
+            "total_bytes": tot_b,
+            "rx_bytes": rx_b,
+            "tx_bytes": tx_b,
+            "num_clients": item.get("num_clients"),
+        })
+    return out
+
+
+def _fetch_client_app_usage(
+    session: requests.Session,
+    api_host: str,
+    site_id: str,
+    mac_raw: str,
+    start_ts: int,
+    end_ts: int,
+) -> List[Dict[str, Any]]:
+    """Query Mist Client Insights (Monitor > Service Levels > Insights) top-app-by-bytes for a client MAC."""
+    if not site_id or not mac_raw:
+        return []
+    mac_hex = normalize_mac(mac_raw)
+    if not mac_hex:
+        return []
+
+    attempts = [
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}/top-app-by-bytes",
+            {"start": str(start_ts), "end": str(end_ts), "limit": "100"},
+        ),
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}",
+            {"metrics": "top-app-by-bytes", "start": str(start_ts), "end": str(end_ts), "limit": "100"},
+        ),
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}/stats",
+            {"metrics": "top-app-by-bytes", "start": str(start_ts), "end": str(end_ts), "limit": "100"},
+        ),
+    ]
+    for url, params in attempts:
+        try:
+            resp = session.get(url, params=params, timeout=15)
+            if resp.status_code == 429:
+                return []
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            parsed = _parse_apps_payload(payload)
+            if parsed:
+                return parsed
+            # If the classic endpoint returned HTTP 200 with an explicit empty results list,
+            # no need to burn extra API calls retrying the same metric.
+            if isinstance(payload, dict) and isinstance(payload.get("results"), list) and len(payload["results"]) == 0:
+                return []
+        except Exception:
+            continue
+    return []
+
+
+def _fetch_client_total_bytes(
+    session: requests.Session,
+    api_host: str,
+    site_id: str,
+    mac_raw: str,
+    start_ts: int,
+    end_ts: int,
+) -> Tuple[float, float, float]:
+    """Return (total_bytes, rx_bytes, tx_bytes) from Mist Client Insights stats."""
+    mac_hex = normalize_mac(mac_raw)
+    if not site_id or not mac_hex:
+        return 0.0, 0.0, 0.0
+
+    for url in (
+        f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}/stats",
+        f"{api_host}/api/v1/sites/{site_id}/insights/client/{mac_hex}",
+    ):
+        try:
+            resp = session.get(
+                url,
+                params={
+                    "metrics": "rx_bytes,tx_bytes",
+                    "start": str(start_ts),
+                    "end": str(end_ts),
+                    "interval": "3600",
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                continue
+            rx_arr = payload.get("rx_bytes") if isinstance(payload.get("rx_bytes"), list) else []
+            tx_arr = payload.get("tx_bytes") if isinstance(payload.get("tx_bytes"), list) else []
+            rx_sum = sum(float(v) for v in rx_arr if isinstance(v, (int, float)) and v > 0)
+            tx_sum = sum(float(v) for v in tx_arr if isinstance(v, (int, float)) and v > 0)
+            if rx_sum > 0 or tx_sum > 0:
+                return rx_sum + tx_sum, rx_sum, tx_sum
+        except Exception:
+            continue
+    return 0.0, 0.0, 0.0
+
+
+def _fetch_site_app_usage(
+    session: requests.Session,
+    api_host: str,
+    site_id: str,
+    start_ts: int,
+    end_ts: int,
+) -> List[Dict[str, Any]]:
+    """Query Mist Site Insights top-app-by-bytes for a site."""
+    if not site_id:
+        return []
+    for url, params in (
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights/top-app-by-bytes",
+            {"start": str(start_ts), "end": str(end_ts), "limit": "100"},
+        ),
+        (
+            f"{api_host}/api/v1/sites/{site_id}/insights",
+            {"metrics": "top-app-by-bytes", "start": str(start_ts), "end": str(end_ts), "limit": "100"},
+        ),
+    ):
+        try:
+            resp = session.get(url, params=params, timeout=15)
+            if resp.status_code != 200:
+                continue
+            parsed = _parse_apps_payload(resp.json())
+            if parsed:
+                return parsed
+        except Exception:
+            continue
+    return []
+
+
+def _device_short_label(dev: Dict[str, Any]) -> str:
+    """Build a concise human-readable device descriptor (hostname + OS/model/mfg)."""
+    host = str(dev.get("hostname") or "").strip()
+    model = str(dev.get("model") or "").strip()
+    family = str(dev.get("family") or "").strip()
+    os_val = str(dev.get("os") or "").strip()
+    mfg = str(dev.get("manufacture") or "").strip()
+
+    hw_parts: List[str] = []
+    for cand in (model, family, os_val, mfg):
+        if cand and cand.lower() not in (host.lower(),) and all(cand.lower() not in p.lower() for p in hw_parts):
+            hw_parts.append(cand)
+            if len(hw_parts) >= 2:
+                break
+
+    hw_str = " / ".join(hw_parts)
+    if host and hw_str:
+        return f"{host} ({hw_str})"
+    return host or hw_str or dev.get("mac") or "Unknown Device"
+
+
+def _discover_all_user_devices(
+    session: requests.Session,
+    api_host: str,
+    org_id: str,
+    target: str,
+    mode: str,
+    duration: str,
+    site_name_map: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    """
+    Discover ALL unique device MAC addresses associated with a user/target across
+    Mist Wi-Fi clients/sessions, Wired clients, and NAC clients in parallel.
+    """
+    mist_dur = "1d" if duration in ("1h", "24h", "1d") else ("30d" if duration == "30d" else "7d")
+    wild_q = target if "*" in target else f"*{target}*"
+
+    def fetch_wifi():
+        try:
+            res = search_wifi_clients(
+                session=session,
+                api_host=api_host,
+                org_id=org_id,
+                query=target,
+                mode=mode,
+                duration="24h" if mist_dur == "1d" else mist_dur,
+                site_name_map=site_name_map,
+            )
+            return res.get("clients") or []
+        except Exception:
+            return []
+
+    def fetch_wired():
+        params: Dict[str, Any] = {"duration": mist_dur, "limit": 100}
+        if mode == "mac":
+            params["mac"] = normalize_mac(target)
+        elif mode == "ip":
+            params["ip"] = target
+        else:
+            params["text"] = wild_q
+        try:
+            return _mist_search_get(
+                session, api_host, f"/api/v1/orgs/{org_id}/wired_clients/search", params, max_pages=1
+            )
+        except Exception:
+            return []
+
+    def fetch_nac():
+        params: Dict[str, Any] = {"duration": mist_dur, "limit": 100}
+        if mode == "mac":
+            params["mac"] = normalize_mac(target)
+        else:
+            params["text"] = wild_q
+        try:
+            return _mist_search_get(
+                session, api_host, f"/api/v1/orgs/{org_id}/nac_clients/search", params, max_pages=1
+            )
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_wifi = pool.submit(fetch_wifi)
+        f_wired = pool.submit(fetch_wired)
+        f_nac = pool.submit(fetch_nac)
+        wifi_rows = f_wifi.result()
+        wired_rows = f_wired.result()
+        nac_rows = f_nac.result()
+
+    by_mac: Dict[str, Dict[str, Any]] = {}
+
+    def ensure_dev(mac_norm: str) -> Dict[str, Any]:
+        rec = by_mac.get(mac_norm)
+        if rec is None:
+            rec = {
+                "mac": format_mac(mac_norm),
+                "mac_raw": mac_norm,
+                "hostname": "",
+                "username": "",
+                "os": "",
+                "family": "",
+                "model": "",
+                "manufacture": "",
+                "sources": [],
+                "ssid": "",
+                "port_id": "",
+                "vlan": None,
+                "ip": "",
+                "site_id": "",
+                "site_name": "Unknown Site",
+                "seen_site_ids": [],
+                "ap_name": "",
+                "ap_mac": "",
+                "band": "",
+                "rssi": None,
+                "online": False,
+                "first_seen": 0,
+                "last_seen": 0,
+            }
+            by_mac[mac_norm] = rec
+        return rec
+
+    def _first_str(*vals: Any) -> str:
+        for v in vals:
+            if isinstance(v, list):
+                for x in v:
+                    s = str(x or "").strip()
+                    if s:
+                        return s
+            else:
+                s = str(v or "").strip()
+                if s:
+                    return s
+        return ""
+
+    for c in wifi_rows:
+        mac_norm = normalize_mac(c.get("mac_raw") or c.get("mac"))
+        if not mac_norm:
+            continue
+        rec = ensure_dev(mac_norm)
+        if "Wi-Fi" not in rec["sources"]:
+            rec["sources"].append("Wi-Fi")
+        rec["online"] = rec["online"] or bool(c.get("online"))
+        ts_last = int(c.get("last_seen") or 0)
+        ts_first = int(c.get("first_seen") or ts_last or 0)
+        if ts_first > 0 and (rec["first_seen"] <= 0 or ts_first < rec["first_seen"]):
+            rec["first_seen"] = ts_first
+        if ts_last >= rec["last_seen"]:
+            rec["last_seen"] = ts_last
+            if c.get("site_id"):
+                rec["site_id"] = str(c["site_id"])
+                rec["site_name"] = str(c.get("site_name") or site_name_map.get(rec["site_id"]) or rec["site_id"])
+            if c.get("ap_name"):
+                rec["ap_name"] = str(c["ap_name"])
+            if c.get("ap_mac"):
+                rec["ap_mac"] = str(c["ap_mac"])
+            if c.get("ssid"):
+                rec["ssid"] = str(c["ssid"])
+            if c.get("ip"):
+                rec["ip"] = str(c["ip"])
+            if c.get("rssi") is not None:
+                rec["rssi"] = c["rssi"]
+            if c.get("band"):
+                rec["band"] = str(c["band"])
+        for sid in (c.get("seen_site_ids") or [c.get("site_id")]):
+            s_str = str(sid or "").strip()
+            if s_str and s_str not in rec["seen_site_ids"]:
+                rec["seen_site_ids"].append(s_str)
+        for fld in ("hostname", "username", "os", "family", "model", "manufacture", "ssid", "ip", "ap_name", "ap_mac"):
+            if not rec.get(fld) and c.get(fld):
+                rec[fld] = str(c[fld])
+        if rec["vlan"] is None and c.get("vlan") is not None:
+            rec["vlan"] = c["vlan"]
+
+    for w in wired_rows:
+        mac_norm = normalize_mac(w.get("mac"))
+        if not mac_norm:
+            continue
+        rec = ensure_dev(mac_norm)
+        if "Wired" not in rec["sources"]:
+            rec["sources"].append("Wired")
+        sid = str(w.get("site_id") or "")
+        if sid and sid not in rec["seen_site_ids"]:
+            rec["seen_site_ids"].append(sid)
+        ts = int(float(w.get("timestamp") or 0))
+        if ts > 0 and (rec["first_seen"] <= 0 or ts < rec["first_seen"]):
+            rec["first_seen"] = ts
+        if ts > rec["last_seen"]:
+            rec["last_seen"] = ts
+            if sid:
+                rec["site_id"] = sid
+                rec["site_name"] = site_name_map.get(sid) or sid
+        for fld, val in (
+            ("hostname", _first_str(w.get("hostname"), w.get("dhcp_hostname"))),
+            ("username", _first_str(w.get("username"), w.get("last_username"))),
+            ("ip", _first_str(w.get("ip"), w.get("last_ip"))),
+            ("port_id", _first_str(w.get("port_id"))),
+            ("manufacture", _first_str(w.get("manufacture"), w.get("mfg"))),
+            ("os", _first_str(w.get("os"))),
+        ):
+            if not rec.get(fld) and val:
+                rec[fld] = val
+        if not rec["site_id"] and sid:
+            rec["site_id"] = sid
+            rec["site_name"] = site_name_map.get(sid) or sid
+        if rec["vlan"] is None and w.get("vlan") is not None:
+            rec["vlan"] = w["vlan"]
+
+    for n in nac_rows:
+        mac_norm = normalize_mac(n.get("mac"))
+        if not mac_norm:
+            continue
+        rec = ensure_dev(mac_norm)
+        nac_type = str(n.get("type") or "").lower()
+        src_lbl = "Wired" if "wired" in nac_type else ("Wi-Fi" if "wire" in nac_type else "NAC")
+        if src_lbl not in rec["sources"]:
+            rec["sources"].append(src_lbl)
+        sid = str(n.get("site_id") or "")
+        if sid and sid not in rec["seen_site_ids"]:
+            rec["seen_site_ids"].append(sid)
+        ts = int(float(n.get("timestamp") or n.get("last_seen") or 0))
+        if ts > 0 and (rec["first_seen"] <= 0 or ts < rec["first_seen"]):
+            rec["first_seen"] = ts
+        if ts > rec["last_seen"]:
+            rec["last_seen"] = ts
+            if sid:
+                rec["site_id"] = sid
+                rec["site_name"] = site_name_map.get(sid) or sid
+        for fld, val in (
+            ("hostname", _first_str(n.get("hostname"), n.get("last_hostname"))),
+            ("username", _first_str(n.get("username"), n.get("last_username"), n.get("idp_user"))),
+            ("ssid", _first_str(n.get("ssid"), n.get("last_ssid"))),
+            ("os", _first_str(n.get("os"))),
+            ("family", _first_str(n.get("family"))),
+            ("model", _first_str(n.get("model"))),
+            ("manufacture", _first_str(n.get("mfg"), n.get("manufacture"))),
+        ):
+            if not rec.get(fld) and val:
+                rec[fld] = val
+        if not rec["site_id"] and sid:
+            rec["site_id"] = sid
+            rec["site_name"] = site_name_map.get(sid) or sid
+
+    devices = list(by_mac.values())
+    devices.sort(key=lambda d: (0 if d["online"] else 1, -int(d.get("last_seen") or 0), d["mac"]))
+    return devices
+
+
+def _answer_user_devices(
+    message: str,
+    target: str,
+    mode: str,
+    session: requests.Session,
+    api_host: str,
+    ui_host: str,
+    org_id: str,
+    site_name_map: Dict[str, str],
+    tzinfo,
+    now_ts: int,
+) -> Dict[str, Any]:
+    """List ALL unique device MAC addresses associated with a user (with exact times seen)."""
+    explicit_win = _has_explicit_time_window(message)
+    mist_dur, win_start, win_end, win_label = _detect_time_window(message, now_ts, tzinfo)
+    ssid_filter = _detect_ssid_filter(message)
+
+    # When no narrow window is specified (e.g. "show the devices associated with nick.bull"),
+    # search the full 30 days across Wi-Fi + Wired + NAC to surface every MAC address Mist has seen.
+    discover_dur = "7d" if (explicit_win and mist_dur in ("1h", "24h", "7d")) else "30d"
+    devices = _discover_all_user_devices(
+        session=session,
+        api_host=api_host,
+        org_id=org_id,
+        target=target,
+        mode=mode,
+        duration=discover_dur,
+        site_name_map=site_name_map,
+    )
+
+    if not devices:
+        return {
+            "reply": (
+                f"I searched Mist across Wi-Fi, Wired, and NAC clients for **`{target}`** (last {discover_dur}) "
+                f"and didn't find any associated device MAC addresses."
+            ),
+            "highlights": [{"label": "Devices Found", "value": "0"}],
+            "links": [],
+            "context": {"last_client_query": target, "last_client_mode": mode},
+        }
+
+    display_user = next((d["username"] for d in devices if d.get("username")), target)
+
+    # If the user asked for a specific time window (e.g. "today"), enrich up to 8 Wi-Fi devices
+    # with events & sessions in parallel so we have exact First Seen & Last Seen inside that window.
+    detail_by_mac: Dict[str, Dict[str, Any]] = {}
+    if explicit_win:
+        candidates = [
+            d for d in devices
+            if "Wi-Fi" in d["sources"] and (d.get("online") or (d.get("last_seen") or 0) >= win_start - 3600)
+        ][:8]
+        if not candidates:
+            candidates = [d for d in devices if "Wi-Fi" in d["sources"]][:4]
+
+        def fetch_det(dev_item: Dict[str, Any]) -> Tuple[str, Optional[Dict[str, Any]]]:
+            try:
+                det = get_wifi_client_detail(
+                    session=session,
+                    api_host=api_host,
+                    org_id=org_id,
+                    mac=dev_item["mac"],
+                    site_id=dev_item.get("site_id") or "",
+                    duration="24h" if mist_dur in ("1h", "24h") else mist_dur,
+                    site_name_map=site_name_map,
+                )
+                return dev_item["mac_raw"], det
+            except Exception:
+                return dev_item["mac_raw"], None
+
+        if candidates:
+            with ThreadPoolExecutor(max_workers=min(6, len(candidates))) as pool:
+                for m_raw, det in pool.map(fetch_det, candidates):
+                    if det:
+                        detail_by_mac[m_raw] = det
+
+    # Compute window-scoped first_seen / last_seen for each device
+    active_in_window: List[Dict[str, Any]] = []
+    older_outside: List[Dict[str, Any]] = []
+
+    for d in devices:
+        if ssid_filter and d.get("ssid") and ssid_filter.lower() not in d["ssid"].lower():
+            continue
+
+        det = detail_by_mac.get(d["mac_raw"])
+        win_ts_list: List[int] = []
+        if det:
+            prof = det.get("profile") or {}
+            if prof.get("online"):
+                d["online"] = True
+            for fld in ("hostname", "username", "os", "family", "model", "manufacture", "ssid", "ip", "ap_name"):
+                if not d.get(fld) and prof.get(fld):
+                    d[fld] = str(prof[fld])
+            for ev in det.get("events") or []:
+                ts = ev.get("timestamp") or 0
+                if isinstance(ts, (int, float)) and win_start <= ts <= win_end:
+                    win_ts_list.append(int(ts))
+            for sess in det.get("sessions") or []:
+                s_ts = sess.get("timestamp") or 0
+                s_dur = sess.get("duration") or 0
+                if isinstance(s_ts, (int, float)) and s_ts > 0:
+                    s_start = int(s_ts - s_dur) if (isinstance(s_dur, (int, float)) and s_dur > 0) else int(s_ts)
+                    # Session overlaps [win_start, win_end]
+                    if s_ts >= win_start and s_start <= win_end:
+                        win_ts_list.append(max(s_start, win_start))
+                        win_ts_list.append(min(int(s_ts), win_end))
+            prof_ls = prof.get("last_seen") or 0
+            if isinstance(prof_ls, (int, float)) and win_start <= prof_ls <= win_end:
+                win_ts_list.append(int(prof_ls))
+            if prof.get("online") and isinstance(prof.get("uptime"), (int, float)) and prof["uptime"] > 0:
+                u_start = int(now_ts - prof["uptime"])
+                if u_start <= win_end:
+                    win_ts_list.append(max(u_start, win_start))
+                    win_ts_list.append(min(now_ts, win_end))
+
+        if not win_ts_list:
+            ls = int(d.get("last_seen") or 0)
+            fs = int(d.get("first_seen") or ls)
+            if ls >= win_start and ls <= win_end:
+                win_ts_list.append(ls)
+            if fs >= win_start and fs <= win_end:
+                win_ts_list.append(fs)
+            if d.get("online") and win_end >= now_ts - 300:
+                win_ts_list.append(now_ts)
+
+        row_copy = dict(d)
+        if explicit_win:
+            if win_ts_list:
+                row_copy["win_first_seen"] = min(win_ts_list)
+                row_copy["win_last_seen"] = max(win_ts_list)
+                active_in_window.append(row_copy)
+            else:
+                older_outside.append(row_copy)
+        else:
+            row_copy["win_first_seen"] = int(d.get("first_seen") or 0)
+            row_copy["win_last_seen"] = int(d.get("last_seen") or 0)
+            active_in_window.append(row_copy)
+
+    if explicit_win and not active_in_window:
+        # Show all older MACs so the answer is still immediately useful
+        older_lines = []
+        links = []
+        for d in older_outside[:10]:
+            src_txt = "/".join(d["sources"]) or "Client"
+            conn = f"{src_txt} · {d['ssid']}" if d.get("ssid") else (f"{src_txt} · {d['port_id']}" if d.get("port_id") else src_txt)
+            older_lines.append(
+                f"- **`{d['mac']}`** — {_device_short_label(d)} · {conn} · **{d['site_name']}** · "
+                f"last seen **{_fmt_local_time(d.get('last_seen'), tzinfo, include_date=True)}**"
+            )
+            if d.get("site_id"):
+                kind = "wired" if d["sources"] == ["Wired"] else ("nac" if d["sources"] == ["NAC"] else "client")
+                links.append(_link_client(org_id, ui_host, d["site_id"], d["mac"], f"{d['hostname'] or d['mac']}", kind=kind))
+        return {
+            "reply": (
+                f"No devices for **{display_user}** were seen **{win_label}**, "
+                f"but Mist has **{len(older_outside)}** associated MAC address(es) from the last {discover_dur}:\n"
+                + "\n".join(older_lines)
+            ),
+            "highlights": [
+                {"label": f"Seen {win_label}", "value": "0"},
+                {"label": f"Total MACs ({discover_dur})", "value": str(len(older_outside))},
+            ],
+            "links": links[:5],
+            "context": {"last_client_query": target, "last_client_mode": mode},
+            "action_tab": "tab-client-lookup",
+        }
+
+    # Format full breakdown of every matched MAC address
+    include_date = not (explicit_win and win_label in ("today", "this morning", "the last hour"))
+    lines: List[str] = []
+    links: List[Dict[str, str]] = []
+    online_count = sum(1 for d in active_in_window if d.get("online"))
+    wifi_cnt = sum(1 for d in active_in_window if "Wi-Fi" in d["sources"])
+    wired_cnt = sum(1 for d in active_in_window if "Wired" in d["sources"])
+
+    for d in active_in_window[:25]:
+        status_tag = "**Online**" if d.get("online") else "Offline"
+        src_txt = "/".join(d["sources"]) or "Client"
+        if d.get("ssid"):
+            conn = f"{src_txt} · **{d['ssid']}**"
+        elif d.get("port_id"):
+            conn = f"{src_txt} · port `{d['port_id']}`"
+        else:
+            conn = src_txt
+
+        fs = d.get("win_first_seen") or 0
+        ls = d.get("win_last_seen") or 0
+        if explicit_win and fs > 0 and ls > 0 and abs(ls - fs) >= 60:
+            time_part = f"first **{_fmt_local_time(fs, tzinfo, include_date=include_date)}**, last **{_fmt_local_time(ls, tzinfo, include_date=include_date)}**"
+        elif ls > 0:
+            time_part = f"seen **{_fmt_local_time(ls, tzinfo, include_date=include_date)}**"
+        elif fs > 0:
+            time_part = f"seen **{_fmt_local_time(fs, tzinfo, include_date=include_date)}**"
+        else:
+            time_part = "time unknown"
+
+        loc_part = f"**{d['site_name']}**" + (f" ({d['ap_name']})" if d.get("ap_name") else "")
+        ip_part = f" · IP `{d['ip']}`" if d.get("ip") else ""
+        lines.append(
+            f"- **`{d['mac']}`** — {_device_short_label(d)} · {status_tag} · {conn} · {loc_part}{ip_part} · {time_part}"
+        )
+        if d.get("site_id") and len(links) < 5:
+            kind = "wired" if d["sources"] == ["Wired"] else ("nac" if d["sources"] == ["NAC"] else "client")
+            links.append(_link_client(org_id, ui_host, d["site_id"], d["mac"], f"{d.get('hostname') or d['mac']}", kind=kind))
+
+    more_note = f"\n…and **{len(active_in_window) - 25}** more MACs." if len(active_in_window) > 25 else ""
+    older_note = ""
+    if explicit_win and older_outside:
+        older_preview = ", ".join(f"`{x['mac']}` ({_device_short_label(x)})" for x in older_outside[:4])
+        extra = f" +{len(older_outside) - 4} more" if len(older_outside) > 4 else ""
+        older_note = f"\nAlso associated in the last {discover_dur} (not seen {win_label}): **{len(older_outside)}** other MAC(s) — {older_preview}{extra}."
+
+    scope_txt = f"**{win_label}**" if explicit_win else f"over the last **{discover_dur}**"
+    header = (
+        f"Found **{len(active_in_window)}** device MAC address(es) for **{display_user}** {scope_txt} "
+        f"({online_count} currently online):"
+    )
+
+    return {
+        "reply": header + "\n" + "\n".join(lines) + more_note + older_note,
+        "highlights": [
+            {"label": "Devices (MACs)", "value": str(len(active_in_window))},
+            {"label": "Online Now", "value": str(online_count)},
+            {"label": "Wi-Fi / Wired", "value": f"{wifi_cnt} / {wired_cnt}"},
+            {"label": "Window", "value": win_label if explicit_win else f"Last {discover_dur}"},
+        ],
+        "links": links,
+        "context": {"last_client_query": target, "last_client_mode": mode},
+        "action_tab": "tab-client-lookup",
+    }
+
+
+def _answer_user_app_traffic(
+    message: str,
+    target: str,
+    mode: str,
+    requested_app: Optional[str],
+    app_tokens: Tuple[str, ...],
+    session: requests.Session,
+    api_host: str,
+    ui_host: str,
+    org_id: str,
+    site_name_map: Dict[str, str],
+    tzinfo,
+    now_ts: int,
+) -> Dict[str, Any]:
+    """Query Mist Client Insights (Monitor > Service Levels > Insights) application traffic across all user MACs."""
+    mist_dur, win_start, win_end, win_label = _detect_time_window(message, now_ts, tzinfo)
+    discover_dur = "7d" if mist_dur in ("1h", "24h", "7d") else "30d"
+
+    devices = _discover_all_user_devices(
+        session=session,
+        api_host=api_host,
+        org_id=org_id,
+        target=target,
+        mode=mode,
+        duration=discover_dur,
+        site_name_map=site_name_map,
+    )
+    if not devices:
+        return {
+            "reply": (
+                f"I searched Mist for **`{target}`** (last {discover_dur}) and couldn't find any client devices "
+                f"to pull application traffic for."
+            ),
+            "highlights": [],
+            "links": [],
+            "context": {"last_client_query": target, "last_client_mode": mode},
+        }
+
+    display_user = next((d["username"] for d in devices if d.get("username")), target)
+
+    # Pick devices active in/near the window (or fallback to top 5 most recent)
+    active_devs = [
+        d for d in devices
+        if d.get("online") or (d.get("last_seen") or 0) >= win_start - 3600
+    ]
+    if not active_devs:
+        active_devs = devices[:5]
+    else:
+        active_devs = active_devs[:8]
+
+    # Build unique (site_id, device) pairs covering EVERY site each MAC visited
+    query_pairs: List[Tuple[str, Dict[str, Any]]] = []
+    seen_pairs = set()
+    for d in active_devs:
+        sids = list(d.get("seen_site_ids") or [])
+        if d.get("site_id") and d["site_id"] not in sids:
+            sids.insert(0, d["site_id"])
+        for sid in sids[:3]:
+            key = (sid, d["mac_raw"])
+            if sid and key not in seen_pairs:
+                seen_pairs.add(key)
+                query_pairs.append((sid, d))
+    query_pairs = query_pairs[:12]
+
+    def fetch_pair_apps(pair: Tuple[str, Dict[str, Any]]):
+        sid, dev_obj = pair
+        apps = _fetch_client_app_usage(session, api_host, sid, dev_obj["mac_raw"], win_start, win_end)
+        return sid, dev_obj, apps
+
+    app_totals: Dict[str, Dict[str, Any]] = {}  # lower_name -> {name, total_bytes, rx_bytes, tx_bytes, by_device}
+    per_device_app_hits: List[Dict[str, Any]] = []
+    queried_devices_count = len({d["mac_raw"] for _, d in query_pairs})
+
+    if query_pairs:
+        with ThreadPoolExecutor(max_workers=min(6, len(query_pairs))) as pool:
+            for sid, dev_obj, apps in pool.map(fetch_pair_apps, query_pairs):
+                sname = site_name_map.get(sid) or dev_obj.get("site_name") or sid
+                for a in apps:
+                    aname = a["app"]
+                    akey = aname.lower()
+                    tb = float(a.get("total_bytes") or 0.0)
+                    rxb = a.get("rx_bytes")
+                    txb = a.get("tx_bytes")
+                    entry = app_totals.get(akey)
+                    if entry is None:
+                        entry = {
+                            "name": aname,
+                            "total_bytes": 0.0,
+                            "rx_bytes": 0.0,
+                            "tx_bytes": 0.0,
+                            "has_rxtx": False,
+                            "devices": {},
+                        }
+                        app_totals[akey] = entry
+                    entry["total_bytes"] += tb
+                    if rxb is not None or txb is not None:
+                        entry["has_rxtx"] = True
+                        entry["rx_bytes"] += float(rxb or 0.0)
+                        entry["tx_bytes"] += float(txb or 0.0)
+                    dkey = (dev_obj["mac_raw"], sid)
+                    d_ent = entry["devices"].get(dkey)
+                    if d_ent is None:
+                        d_ent = {
+                            "mac": dev_obj["mac"],
+                            "label": _device_short_label(dev_obj),
+                            "site_name": sname,
+                            "site_id": sid,
+                            "total_bytes": 0.0,
+                            "rx_bytes": 0.0,
+                            "tx_bytes": 0.0,
+                            "has_rxtx": False,
+                        }
+                        entry["devices"][dkey] = d_ent
+                    d_ent["total_bytes"] += tb
+                    if rxb is not None or txb is not None:
+                        d_ent["has_rxtx"] = True
+                        d_ent["rx_bytes"] += float(rxb or 0.0)
+                        d_ent["tx_bytes"] += float(txb or 0.0)
+
+    ranked_apps = sorted(app_totals.values(), key=lambda x: -x["total_bytes"])
+    total_classified_bytes = sum(x["total_bytes"] for x in ranked_apps)
+
+    # Build clickable Mist Insights links for the user's devices
+    links: List[Dict[str, str]] = []
+    for d in active_devs[:4]:
+        if d.get("site_id"):
+            links.append(_link_client(org_id, ui_host, d["site_id"], d["mac"], f"{d.get('hostname') or d['mac']} Insights", kind="client"))
+
+    # If Mist returned no app breakdown (or total traffic requested), also fetch total rx_bytes/tx_bytes
+    total_client_bytes = 0.0
+    total_client_rx = 0.0
+    total_client_tx = 0.0
+    if (not ranked_apps or not requested_app) and query_pairs:
+        def fetch_pair_bytes(pair: Tuple[str, Dict[str, Any]]):
+            sid, dev_obj = pair
+            return _fetch_client_total_bytes(session, api_host, sid, dev_obj["mac_raw"], win_start, win_end)
+
+        with ThreadPoolExecutor(max_workers=min(6, len(query_pairs))) as pool:
+            for tb, rxb, txb in pool.map(fetch_pair_bytes, query_pairs[:6]):
+                total_client_bytes += tb
+                total_client_rx += rxb
+                total_client_tx += txb
+
+    # Case 1: Specific application requested (e.g. "how much instagram traffic has nick.bull generated today")
+    if requested_app:
+        def app_matches(name_low: str) -> bool:
+            norm_n = re.sub(r"[^a-z0-9]+", " ", name_low).strip()
+            for tok in app_tokens:
+                norm_t = re.sub(r"[^a-z0-9]+", " ", tok.lower()).strip()
+                if norm_t and (norm_t in norm_n or norm_t.replace(" ", "") in norm_n.replace(" ", "")):
+                    return True
+            return False
+
+        matched_apps = [a for a in ranked_apps if app_matches(a["name"].lower())]
+        if matched_apps:
+            sum_bytes = sum(a["total_bytes"] for a in matched_apps)
+            sum_rx = sum(a["rx_bytes"] for a in matched_apps if a["has_rxtx"])
+            sum_tx = sum(a["tx_bytes"] for a in matched_apps if a["has_rxtx"])
+            has_rxtx = any(a["has_rxtx"] for a in matched_apps)
+            pct_share = (sum_bytes / total_classified_bytes * 100.0) if total_classified_bytes > 0 else 0.0
+
+            # Merge per-device hits across matched app variants
+            dev_merged: Dict[str, Dict[str, Any]] = {}
+            for a in matched_apps:
+                for d_ent in a["devices"].values():
+                    k = f"{d_ent['mac']}|{d_ent['site_name']}"
+                    cur = dev_merged.get(k)
+                    if cur is None:
+                        dev_merged[k] = dict(d_ent)
+                    else:
+                        cur["total_bytes"] += d_ent["total_bytes"]
+                        cur["rx_bytes"] += d_ent["rx_bytes"]
+                        cur["tx_bytes"] += d_ent["tx_bytes"]
+                        cur["has_rxtx"] = cur["has_rxtx"] or d_ent["has_rxtx"]
+            dev_rows = sorted(dev_merged.values(), key=lambda x: -x["total_bytes"])
+            per_dev_lines = [
+                (
+                    f"- **`{r['mac']}`** ({r['label']}, **{r['site_name']}**) — **{_fmt_bytes(r['total_bytes'])}**"
+                    + (f" (↓ {_fmt_bytes(r['rx_bytes'])} / ↑ {_fmt_bytes(r['tx_bytes'])})" if r["has_rxtx"] else "")
+                )
+                for r in dev_rows[:8]
+            ]
+            other_top = [a for a in ranked_apps if a not in matched_apps][:4]
+            other_note = (
+                "\nOther top apps " + win_label + ": "
+                + ", ".join(f"**{a['name']}** (`{_fmt_bytes(a['total_bytes'])}`)" for a in other_top)
+                + "."
+                if other_top else ""
+            )
+            rxtx_txt = f" (Download `{_fmt_bytes(sum_rx)}`, Upload `{_fmt_bytes(sum_tx)}`)" if has_rxtx else ""
+            unique_dev_cnt = len({r["mac"] for r in dev_rows})
+            reply = (
+                f"**{display_user}** generated **{_fmt_bytes(sum_bytes)}** of **{requested_app}** traffic **{win_label}**{rxtx_txt} "
+                f"across **{unique_dev_cnt}** device(s) ({pct_share:.1f}% of `{_fmt_bytes(total_classified_bytes)}` classified app traffic):\n"
+                + "\n".join(per_dev_lines)
+                + other_note
+            )
+            return {
+                "reply": reply,
+                "highlights": [
+                    {"label": f"{requested_app} Traffic", "value": _fmt_bytes(sum_bytes)},
+                    {"label": "Share of Apps", "value": f"{pct_share:.1f}%"},
+                    {"label": "Devices Checked", "value": str(queried_devices_count)},
+                    {"label": "Window", "value": win_label},
+                ],
+                "links": links,
+                "context": {"last_client_query": target, "last_client_mode": mode},
+            }
+
+        # Specific app had 0 bytes recorded — show what apps WERE detected for this user!
+        if ranked_apps:
+            top_lines = [
+                f"- **{a['name']}** — **{_fmt_bytes(a['total_bytes'])}**"
+                + (f" (↓ {_fmt_bytes(a['rx_bytes'])} / ↑ {_fmt_bytes(a['tx_bytes'])})" if a["has_rxtx"] else "")
+                for a in ranked_apps[:6]
+            ]
+            return {
+                "reply": (
+                    f"Mist Client Insights recorded **0 B** of **{requested_app}** traffic for **{display_user}** **{win_label}** "
+                    f"(checked **{queried_devices_count}** device MAC(s)). Top apps observed instead:\n"
+                    + "\n".join(top_lines)
+                ),
+                "highlights": [
+                    {"label": f"{requested_app} Traffic", "value": "0 B"},
+                    {"label": "Total App Traffic", "value": _fmt_bytes(total_classified_bytes)},
+                    {"label": "Devices Checked", "value": str(queried_devices_count)},
+                ],
+                "links": links,
+                "context": {"last_client_query": target, "last_client_mode": mode},
+            }
+
+        tot_note = (
+            f" Total client traffic recorded {win_label}: **{_fmt_bytes(total_client_bytes)}** "
+            f"(↓ `{_fmt_bytes(total_client_rx)}` / ↑ `{_fmt_bytes(total_client_tx)}`)."
+            if total_client_bytes > 0
+            else ""
+        )
+        macs_preview = ", ".join(f"`{d['mac']}`" for d in active_devs[:4])
+        return {
+            "reply": (
+                f"Mist Client Insights returned no per-application breakdown for **{display_user}** **{win_label}** "
+                f"across **{queried_devices_count}** device MAC(s) ({macs_preview}).{tot_note} "
+                f"Open Client Insights directly below to verify app classification in Mist."
+            ),
+            "highlights": [
+                {"label": f"{requested_app} Traffic", "value": "No app stats"},
+                {"label": "Total Traffic", "value": _fmt_bytes(total_client_bytes) if total_client_bytes > 0 else "--"},
+                {"label": "Devices Checked", "value": str(queried_devices_count)},
+            ],
+            "links": links,
+            "context": {"last_client_query": target, "last_client_mode": mode},
+        }
+
+    # Case 2: General application / traffic usage breakdown for user
+    if ranked_apps:
+        app_lines = [
+            f"- **#{i+1} {a['name']}** — **{_fmt_bytes(a['total_bytes'])}**"
+            + (f" ({a['total_bytes'] / total_classified_bytes * 100:.1f}%)" if total_classified_bytes > 0 else "")
+            + (f" · ↓ {_fmt_bytes(a['rx_bytes'])} / ↑ {_fmt_bytes(a['tx_bytes'])}" if a["has_rxtx"] else "")
+            for i, a in enumerate(ranked_apps[:8])
+        ]
+        dev_summary = ", ".join(f"`{d['mac']}` ({_device_short_label(d)})" for d in active_devs[:4])
+        extra_dev = f" +{len(active_devs) - 4} more" if len(active_devs) > 4 else ""
+        return {
+            "reply": (
+                f"Top applications for **{display_user}** **{win_label}** across **{queried_devices_count}** device(s) "
+                f"({dev_summary}{extra_dev}) — total classified app traffic **{_fmt_bytes(total_classified_bytes)}**:\n"
+                + "\n".join(app_lines)
+            ),
+            "highlights": [
+                {"label": "Top App", "value": f"{ranked_apps[0]['name']} ({_fmt_bytes(ranked_apps[0]['total_bytes'])})"},
+                {"label": "Total App Traffic", "value": _fmt_bytes(total_classified_bytes)},
+                {"label": "Devices Checked", "value": str(queried_devices_count)},
+            ],
+            "links": links,
+            "context": {"last_client_query": target, "last_client_mode": mode},
+        }
+
+    if total_client_bytes > 0:
+        return {
+            "reply": (
+                f"**{display_user}** transferred **{_fmt_bytes(total_client_bytes)}** **{win_label}** "
+                f"(Download `{_fmt_bytes(total_client_rx)}`, Upload `{_fmt_bytes(total_client_tx)}`) "
+                f"across **{queried_devices_count}** device(s), though Mist returned no per-app breakdown for this window."
+            ),
+            "highlights": [
+                {"label": "Total Traffic", "value": _fmt_bytes(total_client_bytes)},
+                {"label": "Download / Upload", "value": f"{_fmt_bytes(total_client_rx)} / {_fmt_bytes(total_client_tx)}"},
+                {"label": "Devices Checked", "value": str(queried_devices_count)},
+            ],
+            "links": links,
+            "context": {"last_client_query": target, "last_client_mode": mode},
+        }
+
+    return {
+        "reply": (
+            f"Mist Client Insights returned no traffic or application telemetry for **{display_user}** **{win_label}** "
+            f"(checked **{queried_devices_count}** device MAC(s))."
+        ),
+        "highlights": [{"label": "Devices Checked", "value": str(queried_devices_count)}],
+        "links": links,
+        "context": {"last_client_query": target, "last_client_mode": mode},
+    }
+
+
 def _answer_client_question(
     message: str,
     target: str,
@@ -291,18 +1351,57 @@ def _answer_client_question(
     mist_dur, win_start, win_end, win_label = _detect_time_window(message, now_ts, tzinfo)
     ask_first = any(k in low for k in ("first", "earliest", "start", "initially", "arrive", "arrived", "got in"))
     ask_nac = any(k in low for k in ("nac", "reject", "denied", "blocked", "radius", "server reject"))
+    ask_apps, requested_app, app_tokens = _detect_app_query(message)
+    ask_devices = any(
+        k in low
+        for k in (
+            "devices", "device ", "mac address", "mac addresses", "all mac", "macs",
+            "associated with", "connected with", "what has ", "which device", "what device",
+            "show all ", "list all ",
+        )
+    )
 
     site_name_map = {str(s["id"]): str(s.get("name") or s["id"]) for s in (snapshot.get("sites") or []) if s.get("id")}
 
-    # If specifically asking about NAC rejects for this user/MAC, check Mist NAC denies directly
+    # 1. Per-user / per-client application traffic (Mist Client Insights / Service Levels)
+    if ask_apps and not ask_nac:
+        return _answer_user_app_traffic(
+            message=message,
+            target=target,
+            mode=mode,
+            requested_app=requested_app,
+            app_tokens=app_tokens,
+            session=session,
+            api_host=api_host,
+            ui_host=ui_host,
+            org_id=org_id,
+            site_name_map=site_name_map,
+            tzinfo=tzinfo,
+            now_ts=now_ts,
+        )
+
+    # 2. All devices / MAC addresses associated with a user (with exact times seen)
+    if ask_devices and not ask_nac:
+        return _answer_user_devices(
+            message=message,
+            target=target,
+            mode=mode,
+            session=session,
+            api_host=api_host,
+            ui_host=ui_host,
+            org_id=org_id,
+            site_name_map=site_name_map,
+            tzinfo=tzinfo,
+            now_ts=now_ts,
+        )
+
+    # 3. If specifically asking about NAC rejects for this user/MAC, check Mist NAC denies directly
     if ask_nac:
         nac_params: Dict[str, Any] = {"duration": "1d" if mist_dur in ("1h", "24h") else mist_dur, "limit": 50}
         if mode == "mac":
             nac_params["mac"] = normalize_mac(target)
-        elif mode == "username" or "@" in target or "." in target:
-            nac_params["username"] = target
         else:
-            nac_params["text"] = target
+            nac_params["text"] = target if "*" in target else f"*{target}*"
         try:
             nac_hits = _mist_search_get(
                 session, api_host, f"/api/v1/orgs/{org_id}/nac_clients/search", nac_params, max_pages=1
@@ -644,7 +1743,9 @@ def _answer_client_question(
         f"Band `{live_prof.get('band') or '--'}`, Signal `{rssi_txt}`).{first_today_note}"
     )
     if len(clients) > 1:
-        reply += f" ({len(clients)} devices matched — showing most recent.)"
+        other_macs = ", ".join(f"`{c['mac']}` ({_device_short_label(c)})" for c in clients[:6])
+        more_c = f" +{len(clients) - 6} more" if len(clients) > 6 else ""
+        reply += f"\nAll **{len(clients)}** matched MAC(s): {other_macs}{more_c}."
 
     return {
         "reply": reply,
@@ -767,11 +1868,11 @@ def answer_mist_chat(
         return {
             "reply": (
                 "I'm connected directly to your **Mist organization** (read-only). You can ask me things like:\n"
-                "- **User / Client lookups**: *\"What time did nick.bull first connect to eduroam this morning?\"*, *\"Where is up123456 connected?\"*, *\"Who has 10.20.1.55?\"*\n"
-                "- **Outages & VC health**: *\"Which switches are down?\"*, *\"Any down VC members or PFE faults?\"*, *\"Offline APs in Library\"*\n"
-                "- **Thermals**: *\"What's the hottest VC?\"*, *\"Show hottest EX4000/EX4100 switches\"*\n"
-                "- **Wi-Fi & Peaks**: *\"How many users are on eduroam?\"*, *\"What was today's Wi-Fi peak?\"*, *\"Top 5 busiest APs\"*\n"
-                "- **Alarms, Uplinks & NAC**: *\"Show critical alarms\"*, *\"Any APs under 1Gb?\"*, *\"Was nick.bull rejected by NAC?\"*"
+                "- **User Devices & MACs**: *\"Show the devices associated with nick.bull\"*, *\"What devices has nick.bull connected with today and the time seen?\"*\n"
+                "- **App Traffic (Service Levels / Insights)**: *\"How much Instagram traffic has nick.bull generated today?\"*, *\"What apps has nick.bull used today?\"*, *\"Top apps at Library today\"*\n"
+                "- **Client Lookups & Join Times**: *\"What time did nick.bull first connect to eduroam this morning?\"*, *\"Where is up123456 connected?\"*, *\"Who has 10.20.1.55?\"*\n"
+                "- **Outages & VC Health**: *\"Which switches or VC members are down?\"*, *\"Any PFE faults?\"*, *\"What's the hottest VC?\"*\n"
+                "- **Wi-Fi, Peaks, Alarms & NAC**: *\"How many users are on eduroam?\"*, *\"What was today's Wi-Fi peak?\"*, *\"Show critical alarms\"*, *\"Was nick.bull rejected by NAC?\"*"
             ),
             "highlights": [],
             "links": [],
@@ -784,6 +1885,9 @@ def answer_mist_chat(
         "connect", "connected", "join", "joined", "first", "last seen", "where is", "who is",
         "who has", "who's using", "lookup", "find", "locate", "signal", "rssi", "wifi", "wi-fi",
         "eduroam", "roam", "session", "nac", "reject", "denied", "online", "offline", "ip", "mac",
+        "macs", "device", "devices", "associated", "traffic", "usage", "bandwidth", "generated",
+        "app", "apps", "application", "applications", "instagram", "youtube", "tiktok", "teams",
+        "zoom", "netflix", "spotify", "whatsapp", "facebook",
     )
     target, mode = _extract_client_target(text, ctx, sites)
     mentioned_dev = _find_mentioned_device(text, snapshot)
@@ -1210,6 +2314,57 @@ def answer_mist_chat(
             "links": links,
             "context": ctx,
         }
+
+    # 11b. Site-level application traffic (Mist Site Insights top-app-by-bytes)
+    site_wants_apps, site_req_app, site_app_tokens = _detect_app_query(text)
+    if mentioned_site and site_wants_apps:
+        _, win_start, win_end, win_label = _detect_time_window(text, now_epoch, tzinfo)
+        site_apps = _fetch_site_app_usage(session, api_host, mentioned_site["id"], win_start, win_end)
+        site_apps.sort(key=lambda x: -float(x.get("total_bytes") or 0.0))
+        tot_site_bytes = sum(float(a.get("total_bytes") or 0.0) for a in site_apps)
+        site_lnk = _link_site(org_id, ui_host, mentioned_site["id"], f"{mentioned_site['name']} Insights")
+        if site_req_app:
+            matched_sa = [
+                a for a in site_apps
+                if any(tok in a["app"].lower() for tok in site_app_tokens)
+            ]
+            if matched_sa:
+                sum_b = sum(float(a.get("total_bytes") or 0.0) for a in matched_sa)
+                pct = (sum_b / tot_site_bytes * 100.0) if tot_site_bytes > 0 else 0.0
+                return {
+                    "reply": (
+                        f"**{mentioned_site['name']}** generated **{_fmt_bytes(sum_b)}** of **{site_req_app}** traffic **{win_label}** "
+                        f"({pct:.1f}% of `{_fmt_bytes(tot_site_bytes)}` classified app traffic)."
+                    ),
+                    "highlights": [
+                        {"label": f"{site_req_app} Traffic", "value": _fmt_bytes(sum_b)},
+                        {"label": "Share", "value": f"{pct:.1f}%"},
+                        {"label": "Site", "value": mentioned_site["name"]},
+                    ],
+                    "links": [site_lnk],
+                    "context": ctx,
+                }
+            return {
+                "reply": f"Mist Site Insights recorded **0 B** of **{site_req_app}** traffic at **{mentioned_site['name']}** **{win_label}**.",
+                "highlights": [{"label": f"{site_req_app} Traffic", "value": "0 B"}],
+                "links": [site_lnk],
+                "context": ctx,
+            }
+        if site_apps:
+            lines = [
+                f"- **#{i+1} {a['app']}** — **{_fmt_bytes(a['total_bytes'])}**"
+                + (f" ({a['total_bytes'] / tot_site_bytes * 100:.1f}%)" if tot_site_bytes > 0 else "")
+                for i, a in enumerate(site_apps[:8])
+            ]
+            return {
+                "reply": f"Top applications at **{mentioned_site['name']}** **{win_label}**:\n" + "\n".join(lines),
+                "highlights": [
+                    {"label": "#1 App", "value": f"{site_apps[0]['app']} ({_fmt_bytes(site_apps[0]['total_bytes'])})"},
+                    {"label": "Classified Total", "value": _fmt_bytes(tot_site_bytes)},
+                ],
+                "links": [site_lnk],
+                "context": ctx,
+            }
 
     # 12. Site-specific stats OR Org Wi-Fi Users / SSID Breakdown / Busiest Sites
     if mentioned_site and any(k in low for k in ("how many", "users", "clients", "eduroam", "rssi", "signal", "status", "stats", "about", "site", "aps", "wifi")):

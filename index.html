@@ -2431,7 +2431,7 @@
                 class="chat-input"
                 autocomplete="off"
                 maxlength="600"
-                placeholder="Ask Mist in plain English — e.g. &quot;What time did nick.bull first connect to eduroam this morning?&quot; or &quot;Any PFE faults?&quot;"
+                placeholder="Ask Mist — e.g. &quot;Show all devices associated with nick.bull&quot;, &quot;How much Instagram traffic has nick.bull generated today?&quot;, or &quot;Any PFE faults?&quot;"
                 aria-label="Ask Mist Assistant"
               />
               <button type="submit" id="mistChatSendBtn" class="chat-send-btn">
@@ -7109,7 +7109,7 @@
       updateChatContextPill();
       appendChatMessage({
         role: "bot",
-        text: "Ask me anything about your **Mist organization** in plain English — user first-connection times (`nick.bull`, MAC, or IP), down switches or VC member/PFE faults, hottest VCs, Wi-Fi peaks, alarms, or NAC rejects.",
+        text: "Ask me anything about your **Mist organization** in plain English — **all device MACs** for a user, **per-user or per-site application traffic** (Instagram, Teams, YouTube, etc.), first-connection times, down switches / VC member & PFE faults, hottest VCs, Wi-Fi peaks, alarms, or NAC rejects.",
       });
     }
 

@@ -286,6 +286,8 @@ def search_wifi_clients(
     client_path = f"/api/v1/orgs/{org_id}/clients/search"
     session_path = f"/api/v1/orgs/{org_id}/clients/sessions/search"
 
+    wild_q = norm_q if "*" in norm_q else f"*{norm_q}*"
+
     if detected_mode == "mac":
         mac_param = norm_q if len(norm_q) == 12 else f"{norm_q}*"
         search_jobs.append(("clients(mac)", client_path, {"mac": mac_param, "duration": mist_duration, "limit": 200}))
@@ -293,17 +295,17 @@ def search_wifi_clients(
         ip_param = norm_q if IPV4_FULL_RE.match(norm_q) else f"{norm_q}*"
         search_jobs.append(("clients(ip)", client_path, {"ip": ip_param, "duration": mist_duration, "limit": 200}))
     elif detected_mode == "username":
-        search_jobs.append(("clients(username)", client_path, {"username": norm_q, "duration": mist_duration, "limit": 200}))
-        search_jobs.append(("clients(text)", client_path, {"text": norm_q, "duration": mist_duration, "limit": 200}))
+        search_jobs.append(("clients(username)", client_path, {"username": wild_q, "duration": mist_duration, "limit": 200}))
+        search_jobs.append(("clients(text)", client_path, {"text": wild_q, "duration": mist_duration, "limit": 200}))
         search_jobs.append(("sessions(username)", session_path, {"client_username": norm_q, "duration": mist_duration, "limit": 200}))
     elif detected_mode == "hostname":
         host_param = norm_q if "*" in norm_q else f"*{norm_q}*"
         search_jobs.append(("clients(hostname)", client_path, {"hostname": host_param, "duration": mist_duration, "limit": 200}))
-        search_jobs.append(("clients(text)", client_path, {"text": norm_q, "duration": mist_duration, "limit": 200}))
+        search_jobs.append(("clients(text)", client_path, {"text": wild_q, "duration": mist_duration, "limit": 200}))
     else:
-        # Auto general search: check text, username, and partial hostname in parallel
-        search_jobs.append(("clients(text)", client_path, {"text": norm_q, "duration": mist_duration, "limit": 200}))
-        search_jobs.append(("clients(username)", client_path, {"username": norm_q, "duration": mist_duration, "limit": 200}))
+        # Auto general search: check text, username, and sessions in parallel
+        search_jobs.append(("clients(text)", client_path, {"text": wild_q, "duration": mist_duration, "limit": 200}))
+        search_jobs.append(("clients(username)", client_path, {"username": wild_q, "duration": mist_duration, "limit": 200}))
         search_jobs.append(("sessions(username)", session_path, {"client_username": norm_q, "duration": mist_duration, "limit": 200}))
 
     raw_results: List[Tuple[str, List[Dict[str, Any]]]] = []
@@ -311,6 +313,35 @@ def search_wifi_clients(
         futs = [(lbl, pool.submit(safe_search, lbl, path, params)) for lbl, path, params in search_jobs]
         for lbl, fut in futs:
             raw_results.append((lbl, fut.result()))
+
+    # If username/auto search discovered full realm usernames (e.g. nick.bull@port.ac.uk),
+    # query sessions/search once for those exact usernames to catch any session-only MACs.
+    if detected_mode in ("username", "auto"):
+        extra_usernames: List[str] = []
+        norm_low = norm_q.strip("*").lower()
+        for lbl, rows in raw_results:
+            if not lbl.startswith("clients"):
+                continue
+            for row in rows:
+                cand_vals = []
+                if isinstance(row.get("username"), list):
+                    cand_vals.extend(row["username"])
+                elif row.get("username"):
+                    cand_vals.append(row["username"])
+                if row.get("last_username"):
+                    cand_vals.append(row["last_username"])
+                for u in cand_vals:
+                    us = str(u or "").strip()
+                    if us and norm_low in us.lower() and us.lower() != norm_low and us not in extra_usernames:
+                        extra_usernames.append(us)
+        if extra_usernames:
+            extra_rows = safe_search(
+                "sessions(discovered_usernames)",
+                session_path,
+                {"client_username": ",".join(extra_usernames[:5]), "duration": mist_duration, "limit": 200},
+            )
+            if extra_rows:
+                raw_results.append(("sessions(discovered_usernames)", extra_rows))
 
     clients_by_mac: Dict[str, Dict[str, Any]] = {}
 
@@ -321,8 +352,17 @@ def search_wifi_clients(
             if not mac_norm:
                 continue
             site_id = str(row.get("site_id") or "")
+            row_site_ids = [str(s) for s in (row.get("site_ids") or []) if s]
+            if site_id and site_id not in row_site_ids:
+                row_site_ids.insert(0, site_id)
             ap_mac = normalize_mac(row.get("last_ap") or row.get("ap"))
             ts = _parse_int(row.get("timestamp")) or 0
+            connect_ts = _parse_int(row.get("connect")) or 0
+            if not connect_ts and is_session and ts > 0:
+                dur_val = _parse_float(row.get("duration"))
+                if dur_val and dur_val > 0:
+                    connect_ts = max(1, int(ts - dur_val))
+            row_first_ts = min(t for t in (ts, connect_ts) if t > 0) if (ts > 0 or connect_ts > 0) else 0
             hostname = _first_nonempty(row.get("last_hostname"), row.get("hostname"))
             username = _first_nonempty(
                 row.get("last_username"), row.get("username"), row.get("client_username")
@@ -330,12 +370,12 @@ def search_wifi_clients(
             ip = _first_nonempty(row.get("last_ip"), row.get("ip"))
             ssid = _first_nonempty(row.get("last_ssid"), row.get("ssid"))
             vlan = _parse_int(row.get("last_vlan") if row.get("last_vlan") is not None else row.get("vlan"))
-            os_val = _first_nonempty(row.get("os"), row.get("client_os"))
-            family = _first_nonempty(row.get("family"), row.get("client_family"), row.get("device"))
-            model = _first_nonempty(row.get("model"), row.get("client_model"))
+            os_val = _first_nonempty(row.get("last_os"), row.get("os"), row.get("client_os"))
+            family = _first_nonempty(row.get("last_device"), row.get("family"), row.get("client_family"), row.get("device"))
+            model = _first_nonempty(row.get("last_model"), row.get("model"), row.get("client_model"))
             mfg = _first_nonempty(row.get("mfg"), row.get("manufacture"), row.get("client_manufacture"))
             band = _norm_band(row.get("band"))
-            proto = _norm_proto(row.get("proto"))
+            proto = _norm_proto(row.get("proto") or row.get("protocol"))
             rssi = _parse_int(row.get("rssi"))
 
             existing = clients_by_mac.get(mac_norm)
@@ -350,7 +390,7 @@ def search_wifi_clients(
                     "vlan": vlan,
                     "site_id": site_id,
                     "site_name": sites.get(site_id) or site_id or "Unknown Site",
-                    "seen_site_ids": [site_id] if site_id else [],
+                    "seen_site_ids": list(row_site_ids),
                     "ap_mac": format_mac(ap_mac) if ap_mac else "",
                     "ap_name": aps.get(ap_mac) or (format_mac(ap_mac) if ap_mac else ""),
                     "os": os_val,
@@ -363,12 +403,16 @@ def search_wifi_clients(
                     "snr": None,
                     "signal_quality": signal_quality(rssi),
                     "online": False,
+                    "first_seen": row_first_ts,
                     "last_seen": ts,
                     "from_session_only": is_session,
                 }
             else:
-                if site_id and site_id not in existing["seen_site_ids"]:
-                    existing["seen_site_ids"].append(site_id)
+                for sid_item in row_site_ids:
+                    if sid_item and sid_item not in existing["seen_site_ids"]:
+                        existing["seen_site_ids"].append(sid_item)
+                if row_first_ts > 0 and (existing["first_seen"] <= 0 or row_first_ts < existing["first_seen"]):
+                    existing["first_seen"] = row_first_ts
                 if ts > existing["last_seen"]:
                     existing["last_seen"] = ts
                     if site_id:

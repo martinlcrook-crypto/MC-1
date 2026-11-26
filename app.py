@@ -13,6 +13,7 @@ from flask import Flask, jsonify, redirect, request, send_from_directory, sessio
 import requests
 
 from history_store import init_history_db, query_history, record_snapshot
+from mist_chat import answer_mist_chat
 from nac_rejects import collect_nac_server_rejects, format_mac, mist_device_uuid_from_mac, normalize_mac
 from client_lookup import get_wifi_client_detail, search_wifi_clients
 from traffic_stats import MistRateLimitError, collect_traffic_usage, parse_local_datetime_to_epoch
@@ -3363,6 +3364,104 @@ def api_traffic():
     out["calls_used"] = calls_used
     out["cache_age_seconds"] = 0
     out["api_quota"] = get_mist_api_quota_snapshot()
+    resp = jsonify(out)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _get_chat_snapshot() -> Dict[str, Any]:
+    global _cache_data, _cache_timestamp
+    cached_payload = _serve_cached_stats_if_valid(False)
+    if cached_payload is not None:
+        return cached_payload
+    with _cache_lock:
+        if isinstance(_cache_data, dict):
+            return _attach_live_stats_fields(dict(_cache_data))
+    # Cold start before /api/stats has ever populated: fetch once so chat has org/site telemetry
+    try:
+        with _snapshot_fetch_lock:
+            with _cache_lock:
+                if isinstance(_cache_data, dict):
+                    return _attach_live_stats_fields(dict(_cache_data))
+            fresh_data = collect_mist_snapshot()
+            with _cache_lock:
+                _cache_data = fresh_data
+                _cache_timestamp = time.time()
+            try:
+                record_snapshot(HISTORY_DB_PATH, fresh_data)
+            except Exception:
+                pass
+            return _attach_live_stats_fields(dict(fresh_data))
+    except Exception:
+        return {}
+
+
+@app.post("/api/chat")
+def api_chat():
+    if not _is_authenticated():
+        return jsonify({"error": "Authentication required", "login_required": True}), 401
+    if not MIST_ORG_ID or not MIST_API_TOKEN:
+        return jsonify({"error": "Missing MIST_ORG_ID or MIST_API_TOKEN in environment."}), 500
+
+    body = request.get_json(silent=True) or {}
+    message = str(body.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "Please enter a question."}), 400
+    if len(message) > 600:
+        message = message[:600]
+
+    context = body.get("context") if isinstance(body.get("context"), dict) else {}
+    tz_name = str(body.get("timezone") or "").strip() or None
+    tz_offset_raw = body.get("tz_offset_minutes")
+    tz_offset_minutes: Optional[int] = None
+    if isinstance(tz_offset_raw, (int, float)) and not isinstance(tz_offset_raw, bool):
+        tz_offset_minutes = int(tz_offset_raw)
+
+    snapshot = _get_chat_snapshot()
+
+    nac_cached_data: Optional[Dict[str, Any]] = None
+    with _nac_cache_lock:
+        nac_entry = _nac_cache.get("24h")
+        if nac_entry is not None:
+            nac_cached_data = dict(nac_entry[1])
+
+    session = _new_mist_session()
+    calls_used = 0
+    try:
+        result = answer_mist_chat(
+            message=message,
+            snapshot=snapshot,
+            session=session,
+            api_host=MIST_API_HOST,
+            ui_host=MIST_UI_HOST,
+            org_id=MIST_ORG_ID,
+            history_db_path=HISTORY_DB_PATH,
+            context=context,
+            tz_name=tz_name,
+            tz_offset_minutes=tz_offset_minutes,
+            nac_cached_data=nac_cached_data,
+        )
+    except MistRateLimitError as exc:
+        return jsonify({"error": str(exc), "api_quota": get_mist_api_quota_snapshot()}), 429
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"error": f"Mist API returned HTTP {status}", "api_quota": get_mist_api_quota_snapshot()}), 502
+    except Exception as exc:
+        return jsonify({"error": f"Mist assistant error: {exc}", "api_quota": get_mist_api_quota_snapshot()}), 502
+    finally:
+        calls_used = session.call_count
+        session.close()
+
+    out = {
+        "reply": result.get("reply") or "",
+        "highlights": result.get("highlights") or [],
+        "links": [lnk for lnk in (result.get("links") or []) if isinstance(lnk, dict) and lnk.get("url")],
+        "context": result.get("context") if isinstance(result.get("context"), dict) else {},
+        "action_tab": result.get("action_tab") or "",
+        "calls_used": calls_used,
+        "answered_at": datetime.now(timezone.utc).isoformat(),
+        "api_quota": get_mist_api_quota_snapshot(),
+    }
     resp = jsonify(out)
     resp.headers["Cache-Control"] = "no-store"
     return resp
